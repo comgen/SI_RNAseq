@@ -1,0 +1,126 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2639
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 Menlo-Regular;}
+{\colortbl;\red255\green255\blue255;\red127\green0\blue128;\red0\green0\blue0;\red255\green255\blue255;
+\red0\green0\blue0;}
+{\*\expandedcolortbl;;\cssrgb\c57919\c12801\c57269;\csgray\c0;\csgray\c100000;
+\cssrgb\c0\c0\c0;}
+\paperw11900\paperh16840\margl1440\margr1440\vieww25080\viewh23360\viewkind0
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+
+\f0\fs30 \cf0 \
+\
+\cf2 ##################### BRAIN-GVEX #####################\cf0 \
+\
+## Process data\
+library(magrittr)\
+\
+path <- "/Users/ibrahiaa/rnaseq_brain_data_sets/PsychENCODE/asbj\'f8rn_si_score/DE_OFC_5sets_TSD/"\cf3 \cb4 \CocoaLigature0 \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+clinMeta <- read.csv(paste0(path," info_GVEX.txt"), sep="\\t", header=T)\
+count <- read.csv(paste0(path," count_GVEX.txt"), sep=",", header=T, check.names=F)\
+colnames(count)[1] <- "gene_id"\
+\
+id <- subset(clinMeta, Study=="SMRI" & PrimaryDiagnosis %in% c("BD","HC") & Ethnicity =="CAUC")$SampleID %>% unique\
+data <- count[,c("gene_id",id)]\
+\
+data$gene_id <- gsub("\\\\..*","",data$gene_id)\
+data <- data[ duplicated(data$gene_id) == F,]\
+rownames(data) <- data$gene_id\
+data <- data[,-1]\
+#data <- round(data) # round data since RSEM output may be non-integer\
+\
+colData <- clinMeta\
+rownames(colData) <- colData$\cb1 SampleID\
+\cb4 colData <- colData[colnames(data),]\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb1 all( rownames(colData) == colnames(data))\
+colData[,c(2,4,5,6)] <- lapply(colData[,c(2,4,5,6)],as.factor)\
+colData[,c(3,7,8)] <- lapply(colData[,c(3,7,8)],as.numeric)\
+colData$PrimaryDiagnosis <- relevel(colData$PrimaryDiagnosis, ref="HC")\
+\
+colData.filt <- \cb4 subset(colData, SampleID %in% id)\
+\
+data <- data[,rownames(colData.filt)]\
+\cb1 all( rownames(colData.filt) == colnames(data))\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cb4 \
+\
+library(biomaRt)\
+ensembl <- useMart("ensembl", dataset="hsapiens_gene_ensembl", \cf5 \cb1 \expnd0\expndtw0\kerning0
+\CocoaLigature1 host="useast.ensembl.org"\cf3 \cb4 \kerning1\expnd0\expndtw0 \CocoaLigature0 )\
+genemap <- getBM(attributes=c("entrezgene_id","ensembl_gene_id", "external_gene_name", "gene_biotype", "chromosome_name", "start_position", "end_position"), filters="ensembl_gene_id", \
+	values=rownames(data), mart=ensembl)\
+genemap <- genemap[ duplicated(genemap$ensembl_gene_id) == F,]\
+rownames(genemap) <- genemap$ensembl_gene_id\
+\
+\
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+\cf0 \cb1 \CocoaLigature1 ## Remove lowly expressed genes\cf3 \cb4 \CocoaLigature0 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\
+library(edgeR)\
+keep <- filterByExpr(data, design=colData.filt$PrimaryDiagnosis)\
+data.filt <- data[keep,]\
+\
+\
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+\cf0 \cb1 \CocoaLigature1 ## Keep only protein-coding and lncRNA genes\
+genemap2 <- genemap[rownames(data.filt),]\
+genemap2 <- subset(genemap2, gene_biotype %in% c("protein_coding","lncRNA"))\
+data.filt <- data.filt[rownames(genemap2),]\cf3 \cb4 \CocoaLigature0 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\
+\pard\tx566\tx1133\tx1700\tx2267\tx2834\tx3401\tx3968\tx4535\tx5102\tx5669\tx6236\tx6803\pardirnatural\partightenfactor0
+\cf0 \cb1 \CocoaLigature1 \
+## DE analyses\
+\
+library(limma)\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+\cf3 \cb4 \CocoaLigature0 y <- DGEList(counts = data.filt, genes = genemap2, samples=colData.filt)\
+y <- calcNormFactors(y)\
+\
+design <- model.matrix(~ PrimaryDiagnosis + ReportedGender + Age + RIN + PMI, data = colData.filt)\
+\
+v <- voomWithQualityWeights(y, design, plot = TRUE)\
+fit <- lmFit(v, design)\
+fit <- eBayes(fit)\
+summary(decideTests(fit, p.value=0.1))\
+\
+res <- topTable(fit, coef="PrimaryDiagnosisBD", n=Inf, p.value=1)\
+write.table(res, "/Users/ibrahiaa/rnaseq_brain_data_sets/PsychENCODE/asbj\'f8rn_si_score/de_limma_gvex_smri.txt", sep="\\t", row.names=F)\
+\
+\
+## Plot significant genes\
+library(ggsci)\
+library(ggpubr)\
+\
+col <- get_palette("aaas", 10)\
+\
+df <- cpm(y, log=TRUE, prior.count=3) %>% t %>% data.frame\
+df <- df[ , rownames(head(res,10)) ]\
+colnames(df) <- head(res,10)$external_gene_name\
+df <- merge(df,colData.filt,by=0) \
+\
+glist <- lapply(2:11, function (x) \{\
+  ggplot() + \
+    geom_boxplot(data=df,aes(x = PrimaryDiagnosis, y = df[,x]), color ="black",size=0.7, outlier.shape=NA, fill="white") +\
+    geom_point(data=df,aes(x = PrimaryDiagnosis, y = df[,x], color = PrimaryDiagnosis, fill=PrimaryDiagnosis), position=position_jitterdodge(), pch=21,size=3.5, color="black", alpha=0.85) + \
+    labs(title=colnames(df)[x],x="",y="") +\
+    scale_colour_manual(values=col[c(2,9,8)]) +\
+    scale_fill_manual(values=col[c(2,9,8)]) +\
+    theme_classic() +\
+    theme(axis.text.x=element_text(size=20,color="black", angle=0, hjust=0.5),\
+          axis.text.y=element_text(size=20,color="black"),\
+          axis.title=element_text(size=16),\
+          plot.title=element_text(size=20,hjust=0.5),\
+          legend.text=element_text(size=20),\
+          legend.title=element_blank(),\
+          plot.margin=unit(c(0,0,0,0),"cm"),\
+          panel.background=element_rect(linetype="solid", color="black", size=1)) \
+\})\
+\
+annotate_figure(ggarrange(plotlist=glist,ncol=5,nrow=2,common.legend=T,legend="none"),\
+                left=text_grob("Normalized expression",size=20,rot=90))\
+}
