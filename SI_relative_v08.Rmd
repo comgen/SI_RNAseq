@@ -445,7 +445,7 @@ for(i in 1:it){
 
 
 
-```{r calculate SI from residuals}
+```{r calculate WSR from residuals}
 
 #weight residuals with R2
 res_w_C_iterate <- lapply(1:length(res_std_C_iterate), function(x) res_std_C_iterate[[x]]*R2_iterate[[x]] ) #weight residuals according to R2 from the models: multiplication by the vector (R2) is by default done column-wise, since genes are in rows.
