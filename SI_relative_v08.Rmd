@@ -254,13 +254,17 @@ modelset_t <- cbind(AGE = info$Age[match(rownames(modelset_t), info$SampleID)], 
 modelset_t <- cbind(RIN = info$RIN[match(rownames(modelset_t), info$SampleID)], modelset_t)
 modelset_t <- cbind(PMI = info$PMI[match(rownames(modelset_t), info$SampleID)], modelset_t)
 modelset_t <- cbind(Ethnicity_code = info$Ethnicity_code[match(rownames(modelset_t), info$SampleID)], modelset_t) #remove for BipSeq
+#MZ: Is Ethnicity_code numerical or a factor variable? Should be a factor. Are RIN and PMI continuous variables?
 
 modelset_t <- as.matrix(modelset_t)
 # nested for-loop for each gene against each other gene
   lasso_models <- list() # Create empty lists
   lasso_beta <- list()
     for( gene in GOI){
+    
 #first-pass to find the optimal lambda
+#MZ: Note that cv.glmnet should also contain the same penalty factor as the final model. Otherwise, you will select a sub-optimal lambda (which will be optimised for the model without mandatory clinical covariates, while you want the lambda optimised for the model with those covariates):
+
       lasso.cv.tr <- cv.glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y = modelset_t[,colnames(modelset_t) %in% gene], alpha=1, type.measure="deviance",
                          family="gaussian", standardize=TRUE, nfolds=10) #remove the gene being modelled from the data in the model
   #    lasso.lam.tr <- lasso.cv.tr$lambda.min #optimal lambda (minimal)
@@ -271,6 +275,9 @@ modelset_t <- as.matrix(modelset_t)
                               penalty.factor = p.fac,   #this is where some variables are fixed, and not allowed to be penalised. p.fac is set to 0 (default 1)
                                lambda=lasso.lam.tr
                                )
+                               
+      #MZ: As an alternative, you can pull out the fitted final model directly from cv.glmnet, by selecting the model with the right lambda from lasso.mod.tr = lasso.cv.tr$glmnet.fit.
+      
       lasso_models[[gene]] <- lasso.final.tr
       }
 lasso_models
@@ -302,6 +309,7 @@ colnames(lasso_pred) <- rownames(testset_t)
     lasso_pred[gene,] <- pred 
     R2[gene] <- models[[gene]]$dev.ratio
   }
+#MZ: Note that this R2 (= fraction of the null deviance explained by the deviance, i.e. dev.ratio=1-dev/nulldev) will be the R2 on the training data and thus too optimistic. The corresponding R2 on the test data will potentially be much smaller.
 
 testset_obs <- testset_t[,colnames(testset_t) %in% GOI] 
 testset_obs <- t(testset_obs)
@@ -569,6 +577,8 @@ SI_glm_cov <- glm(diag ~ SI + Ethnicity_code + Sex + Age,
        #         +Study, #For BrainGVEX
                   data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
 
+#MZ: Why is Study commented out, i.e. why are you not adjusting for Study in this model?
+
 summary <- summary(SI_glm)
 summary_cov <- summary(SI_glm_cov)
 perf <- model_performance(SI_glm)
@@ -595,6 +605,7 @@ SI_wilcox <- wilcox.test(SI ~ diag, data = SI)
 #get pseudo R2 from the model
 pseudoR2 <- nagelkerke(SI_glm)
 
+#MZ: Again, this is on the same model where the data was fitted. But here this is probably not such a big problem, because the model only has a small number of covariates, so the danger of over-fitting is much smaller.
 
  r2l <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
                    ) 
