@@ -17,7 +17,8 @@ library(rcompanion) #for nagelkerke
 library(pROC) #(in order to get confidence interval of the AUC)
 library(glmnet) #lasso modelling
 library(rstatix) #for t-tests etc in pipe, also multiple testing adjustments.
-
+library(annotables) #simplified conversion of gene names.
+library(scales)
 #library(conflicted)
 #conflict_prefer("filter", "dplyr")
 
@@ -57,6 +58,8 @@ h2l <- cc * e * r2n / (1 + cc * e * theta * r2n)
 
 
 ```{r edgeR normalisation}
+dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+
 Set <- "CMC-HBCC"
 counts <- count_CM
 gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
@@ -238,7 +241,6 @@ rpkm_log_BipSeq_sACC <- rpkm_Set
 ```
 
 
-
 ```{r glmnet lasso model functions}
 #######function to build models #########
 lasso_model <- function(modelset, GOI, info){
@@ -247,37 +249,45 @@ lasso_model <- function(modelset, GOI, info){
    #insert covariates age, sex, RIN, PMI , ethnicity where applicable
   
 modelset_t <- cbind(SEX = info$ReportedGender[match(rownames(modelset_t), info$SampleID)], modelset_t)
-modelset_t$SEX <- str_replace(modelset_t$SEX, "Male", "1")
-modelset_t$SEX <- str_replace(modelset_t$SEX, "Female", "2")
-modelset_t$SEX <- as.numeric(modelset_t$SEX)
+
 modelset_t <- cbind(AGE = info$Age[match(rownames(modelset_t), info$SampleID)], modelset_t)
 modelset_t <- cbind(RIN = info$RIN[match(rownames(modelset_t), info$SampleID)], modelset_t)
 modelset_t <- cbind(PMI = info$PMI[match(rownames(modelset_t), info$SampleID)], modelset_t)
-modelset_t <- cbind(Ethnicity_code = info$Ethnicity_code[match(rownames(modelset_t), info$SampleID)], modelset_t) #remove for BipSeq
-#MZ: Is Ethnicity_code numerical or a factor variable? Should be a factor. Are RIN and PMI continuous variables?
+modelset_t <- cbind(Ethnicity = info$Ethnicity[match(rownames(modelset_t), info$SampleID)], modelset_t) #remove for BipSeq
+
+#dummy Sex:
+modelset_t$Male <- ifelse(modelset_t$SEX == "Male", 1, 0)
+
+#dummy Ethnicity
+modelset_t$ethn_cauc <-  ifelse(modelset_t$Ethnicity == "Caucasian", 1, 0)
+
+modelset_t <- modelset_t %>% select(
+  -Ethnicity, 
+  -SEX)
+modelset_t <- modelset_t %>% relocate(Male, 
+                                      ethn_cauc, 
+                                      .after= AGE)
 
 modelset_t <- as.matrix(modelset_t)
+
 # nested for-loop for each gene against each other gene
   lasso_models <- list() # Create empty lists
   lasso_beta <- list()
     for( gene in GOI){
-    
 #first-pass to find the optimal lambda
-#MZ: Note that cv.glmnet should also contain the same penalty factor as the final model. Otherwise, you will select a sub-optimal lambda (which will be optimised for the model without mandatory clinical covariates, while you want the lambda optimised for the model with those covariates):
-
-      lasso.cv.tr <- cv.glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y = modelset_t[,colnames(modelset_t) %in% gene], alpha=1, type.measure="deviance",
+      lasso.cv.tr <- cv.glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y = modelset_t[,colnames(modelset_t) %in% gene], 
+                               alpha=1,
+                               type.measure="deviance",
+                               penalty.factor = p.fac, 
                          family="gaussian", standardize=TRUE, nfolds=10) #remove the gene being modelled from the data in the model
   #    lasso.lam.tr <- lasso.cv.tr$lambda.min #optimal lambda (minimal)
-      lasso.lam.tr <- lasso.cv.tr$lambda.1se #optimal lambda 
+      lasso.lam.tr <- lasso.cv.tr$lambda.1se #optimal lambda 1se
       lasso.mod.tr <- lasso.cv.tr$glmnet.fit #extract the fitted models
       # Extract the final model with the optimal lambda. Lasso:
       lasso.final.tr <- glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y =  modelset_t[,colnames(modelset_t) %in% gene], family="gaussian",  alpha=1, 
                               penalty.factor = p.fac,   #this is where some variables are fixed, and not allowed to be penalised. p.fac is set to 0 (default 1)
                                lambda=lasso.lam.tr
                                )
-                               
-      #MZ: As an alternative, you can pull out the fitted final model directly from cv.glmnet, by selecting the model with the right lambda from lasso.mod.tr = lasso.cv.tr$glmnet.fit.
-      
       lasso_models[[gene]] <- lasso.final.tr
       }
 lasso_models
@@ -289,13 +299,25 @@ lasso_test <- function(testset, models, GOI, info){
   testset_t <- as.data.frame(t(testset)) 
   #insert covariates age, sex, RIN, PMI  
 testset_t <- cbind(SEX = info$ReportedGender[match(rownames(testset_t), info$SampleID)], testset_t)
-testset_t$SEX <- str_replace(testset_t$SEX, "Male", "1")
-testset_t$SEX <- str_replace(testset_t$SEX, "Female", "2")
-testset_t$SEX <- as.double(testset_t$SEX)
+
 testset_t <- cbind(AGE = info$Age[match(rownames(testset_t), info$SampleID)], testset_t)
 testset_t <- cbind(RIN = info$RIN[match(rownames(testset_t), info$SampleID)], testset_t)
 testset_t <- cbind(PMI = info$PMI[match(rownames(testset_t), info$SampleID)], testset_t)
-testset_t <- cbind(Ethnicity_code = info$Ethnicity_code[match(rownames(testset_t), info$SampleID)], testset_t) #remove for BipSeq
+testset_t <- cbind(Ethnicity = info$Ethnicity[match(rownames(testset_t), info$SampleID)], testset_t) #remove for BipSeq
+
+#dummy Sex:
+testset_t$Male <- ifelse(testset_t$SEX == "Male", 1, 0)
+
+#dummy Ethnicity
+testset_t$ethn_cauc <-  ifelse(testset_t$Ethnicity == "Caucasian", 1, 0)
+
+testset_t <- testset_t %>% select(
+  -Ethnicity, 
+  -SEX)
+testset_t <- testset_t %>% relocate(Male, 
+                                    ethn_cauc, 
+                                    .after= AGE)
+
 
 #for each gene in the testset, predict it based on the model and store each individual's residuals
 lasso_pred = array(dim=c(length(GOI), length(rownames(testset_t))))
@@ -309,7 +331,6 @@ colnames(lasso_pred) <- rownames(testset_t)
     lasso_pred[gene,] <- pred 
     R2[gene] <- models[[gene]]$dev.ratio
   }
-#MZ: Note that this R2 (= fraction of the null deviance explained by the deviance, i.e. dev.ratio=1-dev/nulldev) will be the R2 on the training data and thus too optimistic. The corresponding R2 on the test data will potentially be much smaller.
 
 testset_obs <- testset_t[,colnames(testset_t) %in% GOI] 
 testset_obs <- t(testset_obs)
@@ -320,32 +341,31 @@ lasso_residuals_std <-  lasso_residuals/mean(testset_obs)  #adjust the residuals
 lasso_residuals_std
 }
 
-```
 
+
+
+```
 
 ```{r gene subset}
 # Get one gene per GWAS locus
 subset <- high_L2G_closest$symbol
-#subset <- subset[!subset %in% c( "LMAN2L", "TRPT1")] #take away the double entries (2 loci with 2 genes selected). Locus3: CNNM4 is in co-expression module, thus we drop LMAN2L. Locus 40: FKBP2 has lead SNP as coding variant, also slightly higher l2g. (but it is clustering close to TRPT1). 
-#subset <- subset[!subset %in% c( "CNNM4", "FKBP2")]
+
 
 subset <- unique(subset) # because 2 loci share a gene.
-#make sure subset is included in all sets
-#subset <- subset[subset %in% rownames(rpkm_log_all)]
 length(subset)
 ```
 
 
 Prepare the expression and covariate data
 ```{r}
+info_all <- info_all %>%  filter(!SampleID %in% remove_PCA)
+
 dataset <- "CMC-HBCC"
 dataset <- "CMC-Pitt"
 dataset <- "BipSeq-sACC"
 dataset <- "GVEX-SMRI"
 
 info <- info_all %>%  filter(Set== dataset) 
-#rpkm_log <- rpkm_log_all[,colnames(rpkm_log_all) %in% info$SampleID]
-#rpkm_log <- rpkm_log_GVEX_SMRI
 
   
 rpkm_log_CMC_HBCC <- rpkm_log_CMC_HBCC[,!colnames(rpkm_log_CMC_HBCC) %in% remove_PCA]
@@ -377,7 +397,7 @@ it <- 100 #number of iterations
 model_fraction <- length(HC$SampleID) - length(BD$SampleID) #for CMC_HBCC
 #model_fraction <- length(HC$SampleID) *0.9 #for BrainGVEX_SMRI
 #model_fraction <- length(HC$SampleID) *3/4 #for CMC_Pitt
-#model_fraction <- length(HC$SampleID) *2/3 #for BipSeq sACC, Amg
+#model_fraction <- length(HC$SampleID) *2/3 #for BipSeq sACC
 
 #save the results from iterations to list
 res_std_C_iterate <- list()
@@ -396,8 +416,8 @@ models_iterate <- list()
 
 
 #for BipSeq where ethnicity does not differ
-    p.fac = rep(1, length(subset) -1 + 4) 
-    p.fac[1:4] = 0
+#    p.fac = rep(1, length(subset) -1 + 4) 
+#    p.fac[1:4] = 0
     
   #randomly picked sets of controls for the modeling
 for(i in 1:it){
@@ -489,8 +509,9 @@ mean_res_w <- res_w_all %>%
 
 ```{r save R2}
 #change directory
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/WSR/")
@@ -518,6 +539,10 @@ R2_models <- models_info %>%
 
   ggsave(plot = R2_models, path = dir, filename = "R2_models.pdf", height = 12, width= 30, units="cm")
   
+  
+  
+  
+   #You can calculate R2 for the test data yourself, by extracting the deviance and null deviance and calculating dev.ratio=1-dev/nulldev.
 ```
 
 Calculations based on WSR 
@@ -526,7 +551,7 @@ Calculations based on WSR
 ```{r calculate SI score}
 #change directory
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
@@ -567,17 +592,29 @@ SI$diag <- str_replace(SI$diag, pattern = "HC", replacement = "0")
 SI$diag <- str_replace(SI$diag, pattern = "BD", replacement = "1")
 SI$diag <- as.factor(SI$diag)
 
-SI <-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI$SampleID, info$SampleID)], SI)
+#SI <-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI$SampleID, info$SampleID)], SI)
 SI <-  cbind(Sex = info$ReportedGender[match(SI$SampleID, info$SampleID)], SI)
 SI <-  cbind(Age = info$Age[match(SI$SampleID, info$SampleID)], SI)
 #SI <-  cbind(Study = info$Study[match(SI$SampleID, info$SampleID)], SI) #For BrainGVEX
 
+
+#dummy Sex:
+SI$Male <- ifelse(SI$Sex == "Male", 1, 0)
+
+SI <-  cbind(Ethnicity = info$Ethnicity[match(SI$SampleID, info$SampleID)], SI)
+#dummy Ethnicity
+SI$ethn_cauc <-  ifelse(SI$Ethnicity == "Caucasian", 1, 0)
+
+
 SI_glm <- glm(diag ~ SI, data= as.data.frame(SI), family = "binomial")
-SI_glm_cov <- glm(diag ~ SI + Ethnicity_code + Sex + Age,
+#SI_glm_cov <- glm(diag ~ SI + Ethnicity_code + Sex + Age,
+       #         +Study, #For BrainGVEX
+ #                 data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
+
+SI_glm_cov <- glm(diag ~ SI  + Age + ethn_cauc + Male,
        #         +Study, #For BrainGVEX
                   data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
 
-#MZ: Why is Study commented out, i.e. why are you not adjusting for Study in this model?
 
 summary <- summary(SI_glm)
 summary_cov <- summary(SI_glm_cov)
@@ -589,7 +626,7 @@ SI_boxplot <- SI %>%
  ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
   geom_boxplot(outlier.shape = NA) + 
   geom_jitter(size=0.2) +
-  scale_colour_manual(values=c(cols[1], cols[2]), labels= c("HC", "BD")) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
   labs(colour="Diagnosis") + 
   xlab("Diagnosis")+ 
   theme(legend.key.size = unit(0.5,"line"),
@@ -605,7 +642,6 @@ SI_wilcox <- wilcox.test(SI ~ diag, data = SI)
 #get pseudo R2 from the model
 pseudoR2 <- nagelkerke(SI_glm)
 
-#MZ: Again, this is on the same model where the data was fitted. But here this is probably not such a big problem, because the model only has a small number of covariates, so the danger of over-fitting is much smaller.
 
  r2l <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
                    ) 
@@ -658,10 +694,12 @@ Calculations based on sWSR (i.e. difference from HC mean)
 ```{r calculate sWSR}
 
 #change directory
+
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/sWSR/")
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/sWSR/")
 #dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/sWSR/")
@@ -742,16 +780,29 @@ SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "HC", replacement = "0")
 SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "BD", replacement = "1")
 SI_sWSR$diag <- as.factor(SI_sWSR$diag)
 
-SI_sWSR<-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+#SI_sWSR<-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
 SI_sWSR<-  cbind(Sex = info$ReportedGender[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
 SI_sWSR<-  cbind(Age = info$Age[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
 #SI_sWSR<-  cbind(Study = info$Study[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR) #For CMC-Pitt
 
+#dummy Sex:
+SI_sWSR$Male <- ifelse(SI_sWSR$Sex == "Male", 1, 0)
+
+SI_sWSR <-  cbind(Ethnicity = info$Ethnicity[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+#dummy Ethnicity
+SI_sWSR$ethn_cauc <-  ifelse(SI_sWSR$Ethnicity == "Caucasian", 1, 0)
+
 
 SI_sWSR_glm <- glm(diag ~ SI, data= as.data.frame(SI_sWSR), family = "binomial")
-SI_sWSR_glm_cov <- glm(diag ~ SI + Sex + Age+ Ethnicity_code,
+#SI_sWSR_glm_cov <- glm(diag ~ SI + Sex + Age+ Ethnicity_code,
        #         +Study  , #For BrainGVEX
+ #                 data= as.data.frame(SI_sWSR), family = "binomial") #check to see which variables effect outcome
+
+SI_sWSR_glm_cov <- glm(diag ~ SI  + Age + ethn_cauc + Male,
+       #         +Study, #For BrainGVEX
                   data= as.data.frame(SI_sWSR), family = "binomial") #check to see which variables effect outcome
+
+
 
 summary_sWSR<- summary(SI_sWSR_glm)
 summary_cov_sWSR<- summary(SI_sWSR_glm_cov)
@@ -998,10 +1049,10 @@ When all 4 cortical sets are done - cross validation and predicted probabilities
 # sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/GVEX-SMRI/sWSR/sWSR.txt")
 # sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/BipSeq-sACC/sWSR/sWSR.txt")
 
-sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
-sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
-sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
-sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
+#sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
+#sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
+#sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
+#sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
 
 ```
 
@@ -1042,7 +1093,7 @@ SI_sWSR_all_dens <-
   SI_sWSR_all %>% 
   ggplot(aes(x=SI, colour=PrimaryDiagnosis)) + 
   geom_density() +
-  scale_colour_manual(values=c(cols[1], cols[2]), labels= c("HC", "BD")) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
   theme(legend.position = "none",
         strip.background.x  = element_rect(fill  = "white"),
         axis.text.y = element_blank(),
@@ -1052,8 +1103,9 @@ SI_sWSR_all_dens <-
     facet_wrap(~ Set, nrow = 1,scales = "free_x") +
     scale_x_continuous( breaks= c(0, 0.5, 1, 1.5), limits = c(0,2) ) 
 
-ggsave(SI_sWSR_all_dens, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/SI_dens_all_adjX.pdf", width = 9, height = 4.2, units= "cm")
+#ggsave(SI_sWSR_all_dens, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/SI_dens_all_adjX.pdf", width = 9, height = 4.2, units= "cm")
 
+ggsave(SI_sWSR_all_dens, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/fix_lambda/SI_dens_all_adjX.pdf", width = 9, height = 4.2, units= "cm")
 
 pROC_obj <- list()
 
@@ -1272,7 +1324,10 @@ ggplot(aes(x = PrimaryDiagnosis, y = wsr, color = PrimaryDiagnosis)) +
         strip.background.y  = element_rect(fill  = "#F4A582"),
          strip.background.x  = element_rect(fill  = "white")) + 
     xlab("") + ylab("") +
-  coord_cartesian(ylim = c(-0.1, 0.12)) 
+  coord_cartesian(ylim = c(-0.1, 0.12)) +
+                    scale_y_continuous(
+       labels = label_number(accuracy = 0.1)
+  )
 
 p_blue <- 
   p + theme(strip.background.y = element_rect(fill  = "#92C5DE")) + coord_cartesian(ylim = c(-0.2, 0.15)) 
@@ -1280,9 +1335,9 @@ p_white <-
   p + theme(strip.background.y = element_rect(fill  = "white")) + coord_cartesian(ylim = c(-0.25, 0.25)) 
 
 
- ggsave(plot=p, path = dir, filename = "compare_WSR_BD_HC_redstrip_BD_model.pdf", width = 9, height = 10.48, units = "cm")
-  ggsave(plot=p_blue, path = dir, filename = "compare_WSR_BD_HC_bluestrip_BD_model.pdf", width = 9, height = 10.48, units = "cm")
-  ggsave(plot=p_white, path = dir, filename = "compare_WSR_BD_HC_whitestrip_BD_model.pdf", width = 9, height = 10.48, units = "cm")
+ ggsave(plot=p, path = dir, filename = "compare_WSR_BD_HC_redstrip.pdf", width = 9, height = 10.48, units = "cm")
+  ggsave(plot=p_blue, path = dir, filename = "compare_WSR_BD_HC_bluestrip.pdf", width = 9, height = 10.48, units = "cm")
+  ggsave(plot=p_white, path = dir, filename = "compare_WSR_BD_HC_whitestrip.pdf", width = 9, height = 10.48, units = "cm")
 
 ```
 
@@ -1525,13 +1580,14 @@ sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
                                  "GVEX-SMRI"= sWSR_GVEX_SMRI,  
                                  "BipSeq-sACC"= sWSR_BipSeq_sACC, 
                                   .id = "Set")
+sWSR_samples <- sWSR_all %>% select(Set, SampleID, PrimaryDiagnosis) %>%  distinct() %>% group_by(Set, PrimaryDiagnosis) %>% mutate(n_ind= n()) %>% select(-SampleID) %>%   distinct() 
 
 
 #SI_genes should be based on significance of coefficients in the logistic regression of all datasets
 #We should see what the plot looks like with those 12 genes, but also perhaps consider setting the cutoff at 10% which would lead to 20 genes.
 
 SI_genes <- glm_sWSR_all_coefficients %>%  filter(variable %in% subset, `Pr(>|z|)` < 0.05) %>% select(variable) %>% rename("gene_id" = variable)
-SI_genes <- glm_sWSR_all_coefficients %>%  filter(variable %in% subset, `Pr(>|z|)` < 0.10) %>% select(variable) %>% rename("gene_id" = variable)
+#SI_genes <- glm_sWSR_all_coefficients %>%  filter(variable %in% subset, `Pr(>|z|)` < 0.10) %>% select(variable) %>% rename("gene_id" = variable)
 
 
 #base top rank on significant coefficients in regression of 4 cortical sets
@@ -1601,7 +1657,7 @@ SI2_prop_INDperGENE_thr_split <-
   ylab("Density (genes)")
 
 
-ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_SI_gene_sign_coeff0.10.pdf"), width=8, height=4.3, units = "cm" )
+#ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_SI_gene_sign_coeff0.10.pdf"), width=8, height=4.3, units = "cm" )
 ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_SI_gene_sign_coeff0.05.pdf"), width=8, height=4.3, units = "cm" )
 
 ```
@@ -1742,7 +1798,7 @@ auc_increasing_genes_sWSR_all  <-
   scale_x_continuous(limits = c(0, 53), breaks = c(0, 10, 20, 30, 40, 50))
 
 
-ggsave(plot =auc_increasing_genes_sWSR_all, filename = paste0(save_dir, "auc_increasing_genes_sWSR_all.pdf"), width = 43, height = 43, units = "mm" )
+ggsave(plot =auc_increasing_genes_sWSR_all, filename = paste0(dir, "auc_increasing_genes_sWSR_all.pdf"), width = 43, height = 43, units = "mm" )
 
 ```
 
@@ -1818,7 +1874,9 @@ SI_15best[[dataset]] <- SI_sWSR_15genes_best_set
 ```
 
 ```{r save results 15 best within set}
-save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/incr_gene_SI/15best/"
+#save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/incr_gene_SI/15best/"
+
+save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/fix_lambda/incr_gene_SI/15best/"
 
 write_tsv(gene_rank_all, file = paste0(save_dir, "gene_rank_all.txt" ))
 write_tsv(SI_all_15best, file = paste0(save_dir, "SI_sWSR_15genes_best.txt" ))
@@ -2489,7 +2547,7 @@ ggplot(aes(x = split_set, y = wsr, color = split_set)) +
   geom_jitter(size=0.1,width = 0.2)  +
 #facet_wrap(~ factor(gene_id, levels=genes_R2$gene_id), nrow  = 1) +
   facet_grid(factor(gene_id, levels= plot_genes) ~ factor(Set, levels = c("CMC-HBCC",  "BipSeq-sACC",  "BipSeq-Amg"))) +
-  scale_colour_manual(values=c(cols[1], cols[2]), labels= c("HC1", "HC2")) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC1", "HC2")) +
 #  scale_x_discrete(breaks=c(0,1), labels=c("HC1", "HC2")) +
   theme(text = element_text(size=5),
         legend.position="none",
@@ -3013,7 +3071,7 @@ statistic <-
   
   plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
 
- cols <-  c("#21908CFF",  "#FDE725FF") #green, yellow
+
   
  p <- 
     wsr_all_model_BD %>%
@@ -3024,7 +3082,7 @@ ggplot(aes(x = PrimaryDiagnosis, y = wsr, color = PrimaryDiagnosis)) +
   geom_jitter(size=0.1,width = 0.2)  +
 #facet_wrap(~ factor(gene_id, levels=genes_R2$gene_id), nrow  = 1) +
   facet_grid(rows = vars(factor(gene_id, levels= plot_genes)), cols= vars(factor(Set, levels = c("CMC-HBCC", "GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg")))) +
-  scale_colour_manual(values=c(cols[1], cols[2]), labels= c("HC", "BD")) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
   scale_x_discrete(breaks=c(0,1), labels=c("HC", "BD")) +
   theme(text = element_text(size=5),
         legend.position="none",
