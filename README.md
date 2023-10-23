@@ -28,7 +28,7 @@ BrainGVEX (syn3270015) and BipSeq (syn5844980) studies.
 
 Any advise for common problems or issues.
 ```
-command to run if program contains helper info
+#command to run if program contains helper info
 ```
 
 ## Authors
