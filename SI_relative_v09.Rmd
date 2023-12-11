@@ -1,0 +1,3297 @@
+---
+title: "SI_relative_v09"
+author: "Asbjørn"
+date: "3/9/2023"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(tidyverse)
+library(readxl)
+library(edgeR) #normalisation and DE analysis
+library(RColorBrewer) 
+library(gridExtra) #writing tables + arranging plots on pages
+library(performance) #for summarising model performance
+library(rcompanion) #for nagelkerke
+library(pROC) #(in order to get confidence interval of the AUC)
+library(glmnet) #lasso modelling
+library(rstatix) #for t-tests etc in pipe, also multiple testing adjustments.
+library(annotables) #simplified conversion of gene names.
+library(scales)
+#library(conflicted)
+#conflict_prefer("filter", "dplyr")
+
+
+theme_set(theme_bw()) #change default ggplot background
+theme_update(text= element_text(size = 7, family = "sans"))
+#import self-made functions
+source("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/07_common_scripts/functions.R")
+cols <- scales::viridis_pal()(3)[c(3,2)] #yellow and green
+high_L2G <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/genes_l2g_0.5_locus.txt")
+high_L2G_closest <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/loci_missing_nearest.txt")
+high_L2G_closest <- high_L2G_closest %>% rename("symbol"= Nearest_gene) %>%
+bind_rows( select(high_L2G, symbol, Locus)) %>%  distinct()
+subset <- high_L2G_closest$symbol
+subset <- unique(subset)
+subsetname <- "high_L2G_closest"
+#genes_res_diff <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/core_genes_consistent_res_diff.txt", col_names = FALSE)
+#subset <- genes_res_diff$X1
+#subsetname <- "genes_res_diff_22"
+
+#the liability scale takes into account the discrepancy bewtween number of cases in the test set and in the population
+#k <- 0.02 #according to Kevin O'Connell, this prevalence is what was used in the BD GWAS PGC3
+#p <- 71/(167+71) #proportion cases
+
+result_h2l <- function(k, r2n, p) {
+x <- qnorm(1 - k)
+z <- dnorm(x)
+i <- z / k
+cc <- k * (1 - k) * k * (1 - k) / (z^2 * p * (1 - p))
+theta <- i * ((p - k)/(1 - k)) * (i * ((p - k) / ( 1 - k)) - x)
+e <- 1 - p^(2 * p) * (1 - p)^(2 * (1 - p))
+h2l <- cc * e * r2n / (1 + cc * e * theta * r2n)
+}
+
+
+```
+
+
+```{r change subset, eval=FALSE}
+
+PGC3_PIP_070 <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/paper/revision/gene_pip070_PGC3.txt", col_names = FALSE) 
+
+subset <- PGC3_PIP_070$X1
+subsetname <- "PGC3_PIP_070"
+```
+
+
+```{r edgeR normalisation}
+dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+
+Set <- "CMC-HBCC"
+counts <- count_CM
+gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
+samples_Set <- samples[samples$Set==Set, 2]
+info_Set <- info_all %>% filter(SampleID %in% samples_Set$SampleID)
+info_Set <- info_Set[order(samples_Set$SampleID),]
+counts_Set <- counts[, colnames(counts) %in% samples_Set$SampleID]
+counts_Set <- counts_Set[,order(samples_Set$SampleID)]
+counts_Set  <- counts_Set[(rownames(counts_Set ) %in% gene.length$gene_id),] #remove the counts for genes we don't have lengths for
+#order gene lengths
+counts_Set  <- counts_Set[,order(samples_Set$SampleID)]
+gene.length <- gene.length %>% filter(gene_id %in% rownames(counts_Set))
+gene.length <- gene.length[match(rownames(counts_Set ), gene.length$gene_id), ] #order the same as counts
+setequal(rownames(counts_Set), gene.length$gene_id) #double check that genes and lengths match
+#normalise with edgeR, and have edgeR do the expression-level filtering and log2-transformation
+#edgeR differential expression
+group <- info_Set$PrimaryDiagnosis
+y <- DGEList(counts=counts_Set,
+#group=group,
+samples = info_Set,
+genes= gene.length)
+#library(edgeR)
+y <- DGEList(counts=counts_Set,
+#group=group,
+samples = info_Set,
+genes= gene.length)
+keep <- filterByExpr(y)
+y <- y[keep,]
+y <- calcNormFactors(y)
+rpkm_Set <- edgeR::rpkm(y,
+normalized.lib.sizes = TRUE,
+log = TRUE,
+#log = FALSE #,
+prior.count = 0.01
+)
+rpkm_Set <- as.data.frame(rpkm_Set)
+#replace ensembl IDs with gene symbols
+rpkm_Set <- cbind(symbol = grch38$symbol[ match(rownames(rpkm_Set), grch38$ensgene) ],
+rpkm_Set)
+rpkm_Set$symbol[duplicated(rpkm_Set$symbol)] <- NA #mark the duplicated gene names as NA
+rpkm_Set <- tibble::as_tibble(rpkm_Set, rownames = "gene_id") %>%
+mutate(symbol = coalesce(symbol, gene_id)) #insert ensembl id if NA
+rpkm_Set <- as.data.frame(rpkm_Set[,-1]) #remove the ensemble ids
+rownames(rpkm_Set) <- rpkm_Set$symbol #make the gene names rownames
+rpkm_Set <- rpkm_Set[,-1] #remove the gene name column
+rpkm_log_CMC_HBCC <- rpkm_Set
+
+
+Set <- "CMC-Pitt"
+counts <- count_CM
+gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
+samples_Set <- samples[samples$Set==Set, 2]
+info_Set <- info_all %>% filter(SampleID %in% samples_Set$SampleID)
+info_Set <- info_Set[order(samples_Set$SampleID),]
+counts_Set <- counts[, colnames(counts) %in% samples_Set$SampleID]
+counts_Set <- counts_Set[,order(samples_Set$SampleID)]
+counts_Set  <- counts_Set[(rownames(counts_Set ) %in% gene.length$gene_id),] #remove the counts for genes we don't have lengths for
+#order gene lengths
+counts_Set  <- counts_Set[,order(samples_Set$SampleID)]
+gene.length <- gene.length %>% filter(gene_id %in% rownames(counts_Set))
+gene.length <- gene.length[match(rownames(counts_Set ), gene.length$gene_id), ] #order the same as counts
+setequal(rownames(counts_Set), gene.length$gene_id) #double check that genes and lengths match
+#normalise with edgeR, and have edgeR do the expression-level filtering and log2-transformation
+#edgeR differential expression
+group <- info_Set$PrimaryDiagnosis
+y <- DGEList(counts=counts_Set,
+#group=group,
+samples = info_Set,
+genes= gene.length)
+keep <- filterByExpr(y)
+y <- y[keep,]
+y <- calcNormFactors(y)
+rpkm_Set <- edgeR::rpkm(y,
+normalized.lib.sizes = TRUE,
+log = TRUE,
+#log = FALSE #,
+prior.count = 0.01
+)
+rpkm_Set <- as.data.frame(rpkm_Set)
+#replace ensembl IDs with gene symbols
+rpkm_Set <- cbind(symbol = grch38$symbol[ match(rownames(rpkm_Set), grch38$ensgene) ],
+rpkm_Set)
+rpkm_Set$symbol[duplicated(rpkm_Set$symbol)] <- NA #mark the duplicated gene names as NA
+rpkm_Set <- tibble::as_tibble(rpkm_Set, rownames = "gene_id") %>%
+mutate(symbol = coalesce(symbol, gene_id)) #insert ensembl id if NA
+rpkm_Set <- as.data.frame(rpkm_Set[,-1]) #remove the ensemble ids
+rownames(rpkm_Set) <- rpkm_Set$symbol #make the gene names rownames
+rpkm_Set <- rpkm_Set[,-1] #remove the gene name column
+# rpkm_log_CMC_HBCC <- rpkm_Set
+rpkm_log_CMC_Pitt <- rpkm_Set
+
+
+Set <- "GVEX-SMRI"
+counts <- count_GVEX
+gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
+samples_Set <- samples[samples$Set==Set, 2]
+info_Set <- info_all %>% filter(SampleID %in% samples_Set$SampleID)
+info_Set <- info_Set[order(samples_Set$SampleID),]
+counts_Set <- counts[, colnames(counts) %in% samples_Set$SampleID]
+counts_Set <- counts_Set[,order(samples_Set$SampleID)]
+counts_Set  <- counts_Set[(rownames(counts_Set ) %in% gene.length$gene_id),] #remove the counts for genes we don't have lengths for
+#order gene lengths
+counts_Set  <- counts_Set[,order(samples_Set$SampleID)]
+gene.length <- gene.length %>% filter(gene_id %in% rownames(counts_Set))
+gene.length <- gene.length[match(rownames(counts_Set ), gene.length$gene_id), ] #order the same as counts
+setequal(rownames(counts_Set), gene.length$gene_id) #double check that genes and lengths match
+#normalise with edgeR, and have edgeR do the expression-level filtering and log2-transformation
+#edgeR differential expression
+group <- info_Set$PrimaryDiagnosis
+y <- DGEList(counts=counts_Set,
+#group=group,
+samples = info_Set, 
+genes= gene.length)
+keep <- filterByExpr(y)
+y <- y[keep,]
+y <- calcNormFactors(y)
+rpkm_Set <- edgeR::rpkm(y,
+normalized.lib.sizes = TRUE,
+log = TRUE,
+#log = FALSE #,
+prior.count = 0.01
+)
+rpkm_Set <- as.data.frame(rpkm_Set)
+#replace ensembl IDs with gene symbols
+rpkm_Set <- cbind(symbol = grch38$symbol[ match(rownames(rpkm_Set), grch38$ensgene) ],
+rpkm_Set)
+rpkm_Set$symbol[duplicated(rpkm_Set$symbol)] <- NA #mark the duplicated gene names as NA
+rpkm_Set <- tibble::as_tibble(rpkm_Set, rownames = "gene_id") %>%
+mutate(symbol = coalesce(symbol, gene_id)) #insert ensembl id if NA
+rpkm_Set <- as.data.frame(rpkm_Set[,-1]) #remove the ensemble ids
+rownames(rpkm_Set) <- rpkm_Set$symbol #make the gene names rownames
+rpkm_Set <- rpkm_Set[,-1] #remove the gene name column
+rpkm_log_GVEX_SMRI <- rpkm_Set
+rpkm_log_GVEX_SMRI[1:6,1:6]
+
+
+Set <- "BipSeq-sACC"
+count_BipSeq <- read.csv(paste0(dir, "count_BipSeq.txt"))
+counts <- count_BipSeq
+gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
+samples_Set <- samples[samples$Set==Set, 2]
+info_Set <- info_all %>% filter(SampleID %in% samples_Set$SampleID)
+info_Set <- info_Set[order(samples_Set$SampleID),]
+counts_Set <- counts[, colnames(counts) %in% samples_Set$SampleID]
+counts_Set <- counts_Set[,order(samples_Set$SampleID)]
+counts_Set  <- counts_Set[(rownames(counts_Set ) %in% gene.length$gene_id),] #remove the counts for genes we don't have lengths for
+#order gene lengths
+counts_Set  <- counts_Set[,order(samples_Set$SampleID)]
+gene.length <- gene.length %>% filter(gene_id %in% rownames(counts_Set))
+gene.length <- gene.length[match(rownames(counts_Set ), gene.length$gene_id), ] #order the same as counts
+setequal(rownames(counts_Set), gene.length$gene_id) #double check that genes and lengths match
+#normalise with edgeR, and have edgeR do the expression-level filtering and log2-transformation
+#edgeR differential expression
+group <- info_Set$PrimaryDiagnosis
+y <- DGEList(counts=counts_Set,
+#group=group,
+samples = info_Set,
+genes= gene.length)
+keep <- filterByExpr(y)
+y <- y[keep,]
+y <- calcNormFactors(y)
+rpkm_Set <- edgeR::rpkm(y,
+normalized.lib.sizes = TRUE,
+log = TRUE,
+#log = FALSE #,
+prior.count = 0.01
+)
+rpkm_Set <- as.data.frame(rpkm_Set)
+#replace ensembl IDs with gene symbols
+rpkm_Set <- cbind(symbol = grch38$symbol[ match(rownames(rpkm_Set), grch38$ensgene) ],
+rpkm_Set)
+rpkm_Set$symbol[duplicated(rpkm_Set$symbol)] <- NA #mark the duplicated gene names as NA
+rpkm_Set <- tibble::as_tibble(rpkm_Set, rownames = "gene_id") %>%
+mutate(symbol = coalesce(symbol, gene_id)) #insert ensembl id if NA
+rpkm_Set <- as.data.frame(rpkm_Set[,-1]) #remove the ensemble ids
+rownames(rpkm_Set) <- rpkm_Set$symbol #make the gene names rownames
+rpkm_Set <- rpkm_Set[,-1] #remove the gene name column
+rpkm_log_BipSeq_sACC <- rpkm_Set
+
+```
+
+
+```{r import expression data}
+data_dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+
+rpkm_log_CMC_HBCC <- read_tsv(paste0(data_dir, "CMC-HBCC_rpkm_log.txt"))
+rpkm_log_CMC_HBCC <- column_to_rownames(rpkm_log_CMC_HBCC, var="gene_id")
+
+rpkm_log_CMC_Pitt <-  read_tsv("/Users/asbjorh/PhD/RNAseq_DE/CMC-Pitt_rpkm_log.txt")
+rpkm_log_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_DE/BipSeq-sACC_rpkm_log.txt")
+rpkm_log_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_DE/GVEX-SMRI_rpkm_log.txt")
+
+info_all <-  read_tsv("/Users/asbjorh/PhD/RNAseq_DE/info_all.txt")
+
+remove_PCA <- "" #already removed from the stored data
+```
+
+
+
+```{r glmnet lasso model functions}
+#######function to build models #########
+lasso_model <- function(modelset, GOI, info){
+  modelset_t <- as.data.frame(t(modelset)) 
+ 
+   #insert covariates age, sex, RIN, PMI , ethnicity where applicable
+  
+modelset_t <- cbind(SEX = info$ReportedGender[match(rownames(modelset_t), info$SampleID)], modelset_t)
+
+modelset_t <- cbind(AGE = info$Age[match(rownames(modelset_t), info$SampleID)], modelset_t)
+modelset_t <- cbind(RIN = info$RIN[match(rownames(modelset_t), info$SampleID)], modelset_t)
+modelset_t <- cbind(PMI = info$PMI[match(rownames(modelset_t), info$SampleID)], modelset_t)
+#modelset_t <- cbind(Ethnicity = info$Ethnicity[match(rownames(modelset_t), info$SampleID)], modelset_t) #remove for BipSeq
+
+#dummy Sex:
+modelset_t$Male <- ifelse(modelset_t$SEX == "Male", 1, 0)
+
+#dummy Ethnicity
+#modelset_t$ethn_cauc <-  ifelse(modelset_t$Ethnicity == "Caucasian", 1, 0)
+
+modelset_t <- modelset_t %>% select(
+#  -Ethnicity, 
+  -SEX)
+modelset_t <- modelset_t %>% relocate(Male, 
+ #                                     ethn_cauc, 
+                                      .after= AGE)
+
+modelset_t <- as.matrix(modelset_t)
+
+# nested for-loop for each gene against each other gene
+  lasso_models <- list() # Create empty lists
+  lasso_beta <- list()
+    for( gene in GOI){
+#first-pass to find the optimal lambda
+      lasso.cv.tr <- cv.glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y = modelset_t[,colnames(modelset_t) %in% gene], 
+                               alpha=1,
+                               type.measure="deviance",
+                               penalty.factor = p.fac, 
+                         family="gaussian", standardize=TRUE, nfolds=10) #remove the gene being modelled from the data in the model
+  #    lasso.lam.tr <- lasso.cv.tr$lambda.min #optimal lambda (minimal)
+      lasso.lam.tr <- lasso.cv.tr$lambda.1se #optimal lambda 1se
+      lasso.mod.tr <- lasso.cv.tr$glmnet.fit #extract the fitted models
+      # Extract the final model with the optimal lambda. Lasso:
+      lasso.final.tr <- glmnet(x=modelset_t[,!colnames(modelset_t) %in% gene], y =  modelset_t[,colnames(modelset_t) %in% gene], family="gaussian",  alpha=1, 
+                              penalty.factor = p.fac,   #this is where some variables are fixed, and not allowed to be penalised. p.fac is set to 0 (default 1)
+                               lambda=lasso.lam.tr
+                               )
+      lasso_models[[gene]] <- lasso.final.tr
+      }
+lasso_models
+}
+
+
+####function to get residuals in the testset#####
+lasso_test <- function(testset, models, GOI, info){
+  testset_t <- as.data.frame(t(testset)) 
+  #insert covariates age, sex, RIN, PMI  
+testset_t <- cbind(SEX = info$ReportedGender[match(rownames(testset_t), info$SampleID)], testset_t)
+
+testset_t <- cbind(AGE = info$Age[match(rownames(testset_t), info$SampleID)], testset_t)
+testset_t <- cbind(RIN = info$RIN[match(rownames(testset_t), info$SampleID)], testset_t)
+testset_t <- cbind(PMI = info$PMI[match(rownames(testset_t), info$SampleID)], testset_t)
+#testset_t <- cbind(Ethnicity = info$Ethnicity[match(rownames(testset_t), info$SampleID)], testset_t) #remove for BipSeq
+
+#dummy Sex:
+testset_t$Male <- ifelse(testset_t$SEX == "Male", 1, 0)
+
+#dummy Ethnicity
+#testset_t$ethn_cauc <-  ifelse(testset_t$Ethnicity == "Caucasian", 1, 0)
+
+testset_t <- testset_t %>% select(
+ # -Ethnicity, 
+  -SEX)
+testset_t <- testset_t %>% relocate(Male, 
+  #                                  ethn_cauc, 
+                                    .after= AGE)
+
+
+#for each gene in the testset, predict it based on the model and store each individual's residuals
+lasso_pred = array(dim=c(length(GOI), length(rownames(testset_t))))
+R2= c() #create vector for the R2 
+rownames(lasso_pred) <- GOI
+colnames(lasso_pred) <- rownames(testset_t)
+  for( gene in GOI){
+    test <- testset_t[,!colnames(testset_t) %in% gene]
+    test <- as.matrix(test)
+    pred =  predict(models[[gene]], s=models[[gene]]$lambda, type="response", newx=test)
+    lasso_pred[gene,] <- pred 
+    R2[gene] <- models[[gene]]$dev.ratio
+  }
+
+testset_obs <- testset_t[,colnames(testset_t) %in% GOI] 
+testset_obs <- t(testset_obs)
+testset_obs <- testset_obs[match(rownames(lasso_pred),rownames(testset_obs)), 
+                           match(colnames(lasso_pred),colnames(testset_obs))] #reorder the observed to match the predicted. Keep only matching, i.e. remove the covariate values
+lasso_residuals <- testset_obs - lasso_pred #create a matrix with all residuals
+lasso_residuals_std <-  lasso_residuals/mean(testset_obs)  #adjust the residuals to the mean of observed values
+lasso_residuals_std
+}
+
+
+
+
+```
+
+```{r gene subset}
+# Get one gene per GWAS locus
+subset <- high_L2G_closest$symbol
+
+
+subset <- unique(subset) # because 2 loci share a gene.
+length(subset)
+```
+
+
+Prepare the expression and covariate data
+```{r}
+info_all <- info_all %>%  filter(!SampleID %in% remove_PCA)
+
+dataset <- "CMC-HBCC"
+dataset <- "CMC-Pitt"
+dataset <- "BipSeq-sACC"
+dataset <- "GVEX-SMRI"
+
+info <- info_all %>%  filter(Set== dataset) 
+
+  
+#rpkm_log_CMC_HBCC <- rpkm_log_CMC_HBCC[,!colnames(rpkm_log_CMC_HBCC) %in% remove_PCA]
+rpkm_log <- rpkm_log_CMC_HBCC 
+
+ rpkm_log <- rpkm_log_CMC_Pitt
+ rpkm_log <- rpkm_log_BipSeq_sACC
+ rpkm_log <- rpkm_log_GVEX_SMRI
+
+rpkm_log <- column_to_rownames(rpkm_log, var="gene_id")
+
+subset <- subset[subset %in% rownames(rpkm_log)]
+
+HC <- info %>% filter(PrimaryDiagnosis=="HC") %>% select(SampleID)
+BD <-  info %>% filter(PrimaryDiagnosis=="BD") %>% select(SampleID)
+
+setequal(info$SampleID, colnames(rpkm_log))
+```
+
+
+
+Model and calculate residuals
+
+```{r run iterations of lasso test}
+debug = TRUE
+
+it <- 100 #number of iterations  
+#it <- 300 #for BrainGVEX_SMRI
+#it <- 1000 #for BrainGVEX_SMRI
+
+#model_fraction <- length(HC$SampleID) - length(BD$SampleID) #for CMC_HBCC
+#model_fraction <- length(HC$SampleID) *0.9 #for BrainGVEX_SMRI
+#model_fraction <- length(HC$SampleID) *3/4 #for CMC_Pitt
+model_fraction <- length(HC$SampleID) *2/3 #for BipSeq sACC
+
+model_fraction <- round(model_fraction)
+
+#save the results from iterations to list
+res_std_C_iterate <- list()
+res_std_BD_iterate<- list()
+R2_iterate <- list()  
+models_iterate <- list()  
+#beta_iterate <- list()
+#function to save named beta
+#?
+
+
+#Which variables (covarites) should be fixed?
+#for CMC, GVEX where ethnicity differs 
+   p.fac = rep(1, length(subset) -1 + 5) 
+    p.fac[1:5] = 0
+
+
+#for BipSeq where ethnicity does not differ
+   p.fac = rep(1, length(subset) -1 + 4) 
+    p.fac[1:4] = 0
+    
+  #randomly picked sets of controls for the modeling
+for(i in 1:it){
+  set.seed(i) 
+  HC_model <- slice_sample(HC, n= model_fraction) 
+  modelset <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC_model$SampleID]
+  testset1 <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC$SampleID & !colnames(rpkm_log) %in% HC_model$SampleID]
+  testset2 <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% BD$SampleID]
+  lasso_models <- lasso_model(modelset = modelset, GOI = subset, info =info) #these functions are defined in the chunk "multiple linear model all GOI functions"
+  R2 <- sapply(lasso_models, function(x) as.vector(x[["dev.ratio"]]))
+  test_C <- lasso_test(testset = testset1, models  = lasso_models , GOI = subset, info =info )
+  test_BD <- lasso_test(testset = testset2, models = lasso_models , GOI = subset , info =info)
+  models_iterate[[i]] <- lasso_models 
+  res_std_C_iterate[[i]] = test_C 
+  res_std_BD_iterate[[i]] =  test_BD
+  R2_iterate[[i]] = R2 #save the R2 from all models from the iteration
+  
+    #needs sanity check. Is the length of rownames(test_C) == rownames(test_BD) == R2_iterate[[i]]. Stop if not "all genes are not modelled. check gene subset for duplicates".
+  # Modulus operation
+  if(i %% 10==0) {
+      cat(paste0("iteration: ", i, "\n"))
+  }
+  
+  if(debug==TRUE & i == 10) {
+      cat("HC res \n")
+      print(matrix(test_C[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE)) 
+      print(colnames(test_C)[1:4])
+      print(rownames(test_C)[1:4])
+      cat("\nHC res has dimensions: \n")
+      print(dim(test_C))
+      cat("\nBD res \n")
+      print(matrix(test_BD[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE))
+      print(colnames(test_BD)[1:4])
+      print(rownames(test_BD)[1:4])
+      cat("\nBD res has dimensions: \n")
+      print(dim(test_BD))
+      cat("\nR2 \n")
+      cat(paste0(R2[1:4]), "\n")
+      print(names(R2)[1:4])
+      cat("number of R2:")
+      print(length(R2))
+  }
+  
+   if(debug==TRUE & i == 9) {
+     cat("glimpse of the model dataset \n")
+     print(modelset[1:8,1:8])
+   }
+  
+}
+
+```
+
+
+
+
+```{r calculate WSR from residuals}
+
+#weight residuals with R2
+res_w_C_iterate <- lapply(1:length(res_std_C_iterate), function(x) res_std_C_iterate[[x]]*R2_iterate[[x]] ) #weight residuals according to R2 from the models: multiplication by the vector (R2) is by default done column-wise, since genes are in rows.
+res_w_BD_iterate <- lapply(1:length(res_std_BD_iterate), function(x) res_std_BD_iterate[[x]]*R2_iterate[[x]] )
+
+
+#melt function within list
+meltfun <- function(x,it) {
+   z <- reshape2::melt(x,id.vars=rownames(x))
+  colnames(z) <- c('gene_id', 'SampleID', 'res')
+  z$it = it
+   return(z)
+}
+
+
+res_w_C_all_long <- mapply(meltfun,res_w_C_iterate, it= seq(1:length(res_w_C_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_C_all<-  do.call("rbind", res_w_C_all_long) #combine all iterations into one dataframe
+
+res_w_BD_all_long <- mapply(meltfun,res_w_BD_iterate, it= seq(1:length(res_w_BD_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_BD_all<-  do.call("rbind", res_w_BD_all_long) #combine all iterations into one dataframe
+
+#combine C and BD
+res_w_all <- rbind(res_w_C_all, res_w_BD_all )
+
+#calculate mean weighted residual across iterations
+mean_res_w <- res_w_all %>%  
+  group_by(gene_id, SampleID) %>%  
+  summarise(mean_res_w= mean(res,  na.rm=TRUE)) %>% 
+  ungroup()
+
+
+```
+
+̛
+```{r change save dir}
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
+```
+
+```{r save R2}
+#change directory
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/WSR/")
+
+
+
+models_info <- as.data.frame(do.call(cbind, R2_iterate)) #create a dataframe, each iteration in columns. 
+models_info <- as_tibble(models_info, rownames = "gene_id") %>% rename_with(stringr::str_replace, #rename columns with iterations
+              pattern = "V", replacement = "") %>% 
+  pivot_longer(values_to = "R2", names_to = "iteration", cols = -1) %>% 
+  group_by(gene_id) %>% mutate(gene_median= median(R2))
+
+#write_tsv(models_info, paste0(dir, "models_info.txt"))
+
+R2_models <- models_info %>%   
+  ggplot(aes(x= reorder(gene_id, desc(gene_median)), #reorder according to gene median R2
+             y=R2)) + 
+    geom_boxplot(outlier.shape = NA) + 
+    theme(text = element_text( size = 12 )) +
+    theme(axis.text.x = element_text(angle=90, vjust = 0.5, hjust=1, size= 10)) +
+  xlab("Gene modelled") +
+  ylab("R2 in 100 iterations")
+
+  ggsave(plot = R2_models, path = dir, filename = "R2_models.pdf", height = 12, width= 30, units="cm")
+  
+  
+  
+  
+   #You can calculate R2 for the test data yourself, by extracting the deviance and null deviance and calculating dev.ratio=1-dev/nulldev.
+```
+
+Calculations based on WSR 
+
+
+```{r calculate SI score}
+#change directory
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/WSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/WSR/")
+
+#calculate SI
+SI <- mean_res_w %>% 
+  group_by(SampleID) %>% 
+  summarise(SI = sum(abs(mean_res_w))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup()
+  
+SI <- SI %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
+
+
+SI <- rename(SI, "diag" = PrimaryDiagnosis)
+
+```
+
+
+```{r compare C and BD }
+SI_C_BD <- SI
+
+ options(digits = 5)
+SI_HC <- filter(SI_C_BD, diag=="HC") 
+SI_BD <- filter(SI_C_BD,  diag=="BD")
+ks.test( SI_BD$SI,  SI_HC$SI)
+kstest <- ks.test( SI_BD$SI,  SI_HC$SI)
+
+
+```
+
+
+```{r logistic regression}
+
+SI$diag <- str_replace(SI$diag, pattern = "HC", replacement = "0")
+SI$diag <- str_replace(SI$diag, pattern = "BD", replacement = "1")
+SI$diag <- as.factor(SI$diag)
+
+#SI <-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI$SampleID, info$SampleID)], SI)
+SI <-  cbind(Sex = info$ReportedGender[match(SI$SampleID, info$SampleID)], SI)
+SI <-  cbind(Age = info$Age[match(SI$SampleID, info$SampleID)], SI)
+#SI <-  cbind(Study = info$Study[match(SI$SampleID, info$SampleID)], SI) #For BrainGVEX
+
+
+#dummy Sex:
+SI$Male <- ifelse(SI$Sex == "Male", 1, 0)
+
+SI <-  cbind(Ethnicity = info$Ethnicity[match(SI$SampleID, info$SampleID)], SI)
+#dummy Ethnicity
+SI$ethn_cauc <-  ifelse(SI$Ethnicity == "Caucasian", 1, 0)
+
+
+SI_glm <- glm(diag ~ SI, data= as.data.frame(SI), family = "binomial")
+#SI_glm_cov <- glm(diag ~ SI + Ethnicity_code + Sex + Age,
+       #         +Study, #For BrainGVEX
+ #                 data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
+
+SI_glm_cov <- glm(diag ~ SI  + Age + ethn_cauc + Male,
+       #         +Study, #For BrainGVEX
+                  data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
+
+
+summary <- summary(SI_glm)
+summary_cov <- summary(SI_glm_cov)
+perf <- model_performance(SI_glm)
+
+
+
+#show the distribution of SI values as points
+SI_boxplot <- SI %>% 
+  rename(Diagnosis = diag) %>% 
+ ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(size=0.2) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  labs(colour="Diagnosis") + 
+  xlab("Diagnosis")+ 
+  theme(legend.key.size = unit(0.5,"line"),
+        legend.position = ""
+        ) + 
+  scale_x_discrete(breaks=c(0,1),
+                    labels=c("HC", "BD")) +
+  ylab("SI score")
+
+SI_ttest <- t.test(SI ~ diag, data = SI)
+SI_wilcox <- wilcox.test(SI ~ diag, data = SI)
+
+#get pseudo R2 from the model
+pseudoR2 <- nagelkerke(SI_glm)
+
+
+ r2l <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+```
+
+```{r save analysis }
+write_tsv(SI, file = paste0(dir,"SI_C_BD_wsr.txt"))
+write.csv(summary$coefficients, file=paste0(dir, "glm_summary.txt"))
+write.csv(summary_cov$coefficients, file=paste0(dir, "glm_covariates_summary.txt"))
+write.csv(perf, file=paste0(dir, "glm_perf.txt"))
+write.csv(pseudoR2$Pseudo.R.squared.for.model.vs.null, file=paste0(dir, "glm_pseudoR2.txt"))
+write.csv( unlist(SI_ttest), file=paste0(dir, "SI_ttest.txt"))
+write.csv( unlist(SI_wilcox), file=paste0(dir, "SI_wilcox.txt"))
+write.csv(r2l, file=paste0(dir, "nagelkerke_liab.txt"))
+write.csv(as.data.frame(unlist(kstest)), file = paste0(dir,"SI_kstest.txt"))
+ggsave(plot= SI_boxplot, filename = paste0(dir, "SI_boxplot.pdf"), width = 43, height = 43, units = "mm")
+```
+
+
+Inspect the regression by ROC curves 
+```{r AUC of the regression}
+#ROC (Receiver operating characteristic) curve
+pROC_obj <- roc(SI$diag,SI$SI,
+                direction= "<", #when cases have lower SI, we need to force the direction
+            smoothed = TRUE,
+            # arguments for ci
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+sens.ci <- ci.se(pROC_obj)
+
+
+sens_ci_fix <- as_tibble(sens.ci, rownames = "spec")
+sens_ci_fix$spec <- as.numeric(sens_ci_fix$spec)
+
+pROC <- 
+  ggroc(pROC_obj, size=0.5) + 
+  geom_abline(slope=1, intercept = 1, linetype = "dashed", alpha=0.7, color = "black") +
+  geom_ribbon(data = sens_ci_fix, 
+              aes(x = spec, ymin = `2.5%`, ymax = `97.5%`), 
+              fill = "#053061", alpha= 0.2) +
+  xlab("Specificity") + ylab("Sensitivity")
+
+write.csv(pROC_obj$auc, file=paste0(dir, "auc_SI_WSR.txt"))
+ggsave(pROC, filename = paste0(dir, "ROC_WSR.pdf"), width = 43, height = 43, units = "mm")  
+```
+
+̛
+```{r change save dir sWSR}
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
+```
+
+
+
+Calculations based on sWSR (i.e. difference from HC mean)
+```{r calculate sWSR}
+
+#change directory
+
+dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/sWSR/")
+
+#get diagnosis back in
+mean_res_w_info <- mean_res_w %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
+mean_res_w_info <- mean_res_w_info %>%  rename("wsr"= mean_res_w)
+
+#calculate mean and sd for the HC
+wsr_mean_HC <- mean_res_w_info %>% 
+  filter(PrimaryDiagnosis =="HC") %>% 
+  group_by(gene_id) %>% 
+  mutate(mean_HC = mean(wsr),
+         sd_HC = sd(wsr)) %>% 
+  ungroup() %>% 
+  select(gene_id, mean_HC, sd_HC) %>% 
+  distinct()
+
+#calculate sWSR-value. This is at first how many sd(HC) are the individual value from the mean HC?
+
+sWSR_Set <- mean_res_w_info %>% 
+  left_join(wsr_mean_HC, by="gene_id") %>% 
+  mutate(sWSR = (wsr- mean_HC)/ sd_HC)
+
+```
+
+
+```{r SI score sWSR}
+#calculate SI
+SI_sWSR <- sWSR_Set %>% 
+ drop_na() %>%  #when all models have R2=0 for a gene, then res will be 0 and SI NA
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup() %>% 
+  select(SampleID, PrimaryDiagnosis, SI) %>%
+  distinct()
+
+SI_sWSR<- rename(SI_sWSR, "diag" = PrimaryDiagnosis)
+SI_sWSR$diag <- factor(SI_sWSR$diag, levels= c("HC", "BD"))
+
+
+SI_sWSR_boxplot <- 
+  SI_sWSR %>% 
+  rename(Diagnosis = diag) %>% 
+ ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(size=0.2) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  labs(colour="Diagnosis") + 
+  xlab("Diagnosis")+ 
+  theme(legend.key.size = unit(0.5,"line"),
+        legend.position = ""
+        ) + 
+  scale_x_discrete(labels=c("HC", "BD")) +
+     scale_y_continuous(
+       labels = label_number(accuracy = 0.1)
+       ) +
+  ylab("SI score")
+
+SI_sWSR_dens <- 
+  SI_sWSR %>% 
+  ggplot(aes(x=SI, colour=diag)) + 
+  geom_density(size=1) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  theme(legend.position = "none") +
+  labs(x= "SI score", y= "Density")
+
+ggsave(plot= SI_sWSR_boxplot, filename = paste0(dir, "SI_sWSR_boxplot.pdf"), width = 43, height = 43, units = "mm")
+ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43, height = 43, units = "mm")
+
+```
+
+```{r calculate ttest nagelkerke and auc}
+
+SI_sWSR_ttest <- t.test(SI ~ diag, data = SI_sWSR)
+SI_sWSR_wilcox <- wilcox.test(SI ~ diag, data = SI_sWSR)
+
+SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "HC", replacement = "0")
+SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "BD", replacement = "1")
+SI_sWSR$diag <- as.factor(SI_sWSR$diag)
+
+#SI_sWSR<-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+SI_sWSR<-  cbind(Sex = info$ReportedGender[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+SI_sWSR<-  cbind(Age = info$Age[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+#SI_sWSR<-  cbind(Study = info$Study[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR) #For CMC-Pitt
+
+#dummy Sex:
+SI_sWSR$Male <- ifelse(SI_sWSR$Sex == "Male", 1, 0)
+
+SI_sWSR <-  cbind(Ethnicity = info$Ethnicity[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+#dummy Ethnicity
+SI_sWSR$ethn_cauc <-  ifelse(SI_sWSR$Ethnicity == "Caucasian", 1, 0)
+
+
+SI_sWSR_glm <- glm(diag ~ SI, data= as.data.frame(SI_sWSR), family = "binomial")
+#SI_sWSR_glm_cov <- glm(diag ~ SI + Sex + Age+ Ethnicity_code,
+       #         +Study  , #For BrainGVEX
+ #                 data= as.data.frame(SI_sWSR), family = "binomial") #check to see which variables effect outcome
+
+SI_sWSR_glm_cov <- glm(diag ~ SI  + Age + ethn_cauc + Male,
+       #         +Study, #For BrainGVEX
+                  data= as.data.frame(SI_sWSR), family = "binomial") #check to see which variables effect outcome
+
+
+
+summary_sWSR<- summary(SI_sWSR_glm)
+summary_cov_sWSR<- summary(SI_sWSR_glm_cov)
+perf_sWSR<- model_performance(SI_sWSR_glm)
+
+
+#get pseudo R2 from the model
+pseudoR2_sWSR<- nagelkerke(SI_sWSR_glm)
+r2l_sWSR <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2_sWSR$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <- roc(SI_sWSR$diag,SI_sWSR$SI,
+                direction= "<", #when cases have lower SI, we need to force the direction
+            smoothed = TRUE,
+            # arguments for ci
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+
+auc_sWSR <- pROC_obj$auc
+
+```
+
+```{r save sWSR results}
+write_tsv(sWSR_Set, paste0(dir, "sWSR.txt"))
+write_tsv(SI_sWSR, file= paste0(dir, "SI_sWSR.txt"))
+write.csv( unlist(SI_sWSR_ttest), file= paste0(dir,"SI_sWSR_ttest.txt"))
+write.csv( unlist(SI_sWSR_wilcox), file= paste0(dir,"SI_sWSR_wilcox.txt"))
+write.csv(r2l_sWSR,  file= paste0(dir,"r2l_sWSR.txt"))
+write.csv(auc_sWSR[1], file=paste0(dir, "auc_sWSR.txt"))
+ggsave(pROC, filename = paste0(dir, "ROC_sWSR.pdf"), width = 43, height = 43, units = "mm")  
+ggsave(plot= SI_sWSR_boxplot, filename = paste0(dir, "SI_sWSR_boxplot.pdf"), width = 43, height = 43, units = "mm")
+ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43, height = 43, units = "mm")
+
+
+```
+
+
+
+```{r save result for combination}
+sWSR_CMC_HBCC <- sWSR_Set
+sWSR_CMC_Pitt <- sWSR_Set
+sWSR_BipSeq_sACC <- sWSR_Set
+sWSR_GVEX_SMRI <- sWSR_Set
+
+```
+
+
+```{r raster plot sWSR CMC-HBCC}
+col2 <- colorRampPalette(c("#67001F", "#B2182B", "#D6604D", "#F4A582",
+                           "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE",
+                           "#4393C3", "#2166AC", "#053061"))
+
+SI_sWSR_HBCC <- sWSR_CMC_HBCC %>% 
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup() 
+
+
+SI_C_BD <- SI_sWSR_HBCC  %>% select(SampleID, PrimaryDiagnosis, SI) %>%  distinct()
+
+
+SI_C <- SI_C_BD %>% filter(PrimaryDiagnosis == "HC")
+SI_BD <- SI_C_BD %>% filter(PrimaryDiagnosis == "BD")
+
+SI_C <- SI_C %>% 
+  group_by(SampleID) %>% 
+  arrange(SI) %>% ungroup()
+
+SI_C$SampleID <-
+  factor(SI_C$SampleID, levels=unique(SI_C$SampleID))
+
+SI_BD <- SI_BD %>% 
+  group_by(SampleID) %>% 
+  arrange(SI) %>% ungroup()
+
+SI_BD$SampleID <-
+  factor(SI_BD$SampleID, levels=unique(SI_BD$SampleID))
+
+
+
+
+BD_SI_sWSR_HBCC  <- SI_sWSR_HBCC %>% filter(PrimaryDiagnosis == "BD") 
+C_SI_sWSR_HBCC <- SI_sWSR_HBCC %>% filter(PrimaryDiagnosis == "HC")
+
+
+BD_SI_sWSR_HBCC$SampleID <-
+  factor(BD_SI_sWSR_HBCC$SampleID, levels=unique(SI_BD$SampleID))
+
+BD_SI_sWSR_HBCC <-
+  BD_SI_sWSR_HBCC %>% 
+  group_by(gene_id) %>% 
+  mutate(gene_mean=mean(abs(sWSR))) %>% 
+  arrange(gene_mean) %>% ungroup() 
+
+BD_SI_sWSR_HBCC$gene_id <-
+  factor(BD_SI_sWSR_HBCC$gene_id, levels=unique(BD_SI_sWSR_HBCC$gene_id))
+
+
+C_SI_sWSR_HBCC$SampleID <-
+  factor(C_SI_sWSR_HBCC$SampleID, levels=unique(SI_C$SampleID))
+
+C_SI_sWSR_HBCC <-
+  C_SI_sWSR_HBCC %>% 
+  group_by(gene_id) %>% 
+  mutate(gene_mean=mean(abs(sWSR))) %>% 
+  arrange(gene_mean) %>% ungroup() 
+
+C_SI_sWSR_HBCC$gene_id <-
+  factor(C_SI_sWSR_HBCC$gene_id, levels=unique(BD_SI_sWSR_HBCC$gene_id))
+
+
+
+
+
+top_BD_sWSR_genes <- sWSR_CMC_HBCC %>% filter(PrimaryDiagnosis == "BD") %>% group_by(gene_id) %>%  summarise(mean_BD = mean(abs(sWSR))) %>% arrange(desc(mean_BD)) %>%  head(n=32) %>%  select(gene_id)
+
+  BD_res <- 
+    BD_SI_sWSR_HBCC %>% 
+    filter(gene_id %in% top_BD_sWSR_genes$gene_id) %>% #filter out the 20 genes with lowest mean abs value in the BD
+    ggplot(aes(x=SampleID, y=gene_id)) + 
+  geom_raster(aes(fill=sWSR)) + 
+      scale_fill_stepsn(colours = c("#2166AC", "#4393C3",  "#D1E5F0",   "#FFFFFF", "#FDDBC7", "#D6604D", "#B2182B"),
+                        breaks = c(-2,-1,0, 1, 2), limits=c(-10,10)) +
+           theme(axis.text= element_blank()) +
+      theme(axis.ticks =  element_blank()) +
+      theme(axis.title  =  element_blank()) +
+      theme(legend.title = element_blank())+
+    labs(title = "BD samples", ) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ylab("Gene")
+
+ C_res <- 
+      C_SI_sWSR_HBCC %>% 
+   filter(gene_id %in% top_BD_sWSR_genes$gene_id) %>% 
+   ggplot(aes(x=SampleID, y=gene_id)) + 
+  geom_raster(aes(fill=sWSR)) + 
+      scale_fill_stepsn(colours = c("#2166AC", "#4393C3",  "#D1E5F0",   "#FFFFFF", "#FDDBC7", "#D6604D", "#B2182B"),
+                        breaks = c(-2,-1,0, 1, 2), limits=c(-10,10)) +
+    theme(axis.text.x= element_blank())+
+      theme(axis.ticks.x =  element_blank()) +
+      theme(axis.title.x  =  element_blank())+
+   theme(legend.position = "none") +
+    labs(title = "Control samples") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ylab("Gene")  
+ 
+#show the BD and C raster plot together with the tiles being the same size (number of samples drives the width of the plot)   
+library(egg)
+p1 <- egg::set_panel_size( C_res, width=unit(length(unique(C_SI_sWSR_HBCC$SampleID))/1.75, "mm"),
+                          height=unit(length(subset)*1.5, "mm"), margin = unit(0.5, "mm") )
+p2 <- egg::set_panel_size( BD_res, width=unit(length(unique(BD_SI_sWSR_HBCC$SampleID))/1.75, "mm"),
+                          height=unit(length(subset)*1.5, "mm"), margin = unit(0.5, "mm") )
+
+
+SI_C_plot <- 
+   SI_C%>% mutate(gene_id= "SI_sample") %>% 
+   ggplot(aes(x=SampleID, y=gene_id)) + 
+     geom_raster(aes(fill=SI)) + 
+     scale_fill_stepsn(colours = c("#FFFFFF",  "#D6604D", "#B2182B"),
+           #            breaks = c(0, 0.15, 0.2, 0.28), limits=c(0,0.5))   +
+                     #  breaks = c(0, 0.15, 0.2, 0.28), limits=c(0,0.5))   +
+              breaks = c(0, 0.8, 1.2), limits=c(0,3))   +
+   theme(axis.text.x= element_blank()) +
+   theme(axis.text.y= element_blank()) +
+      theme(axis.title.x = element_blank()) +
+    theme(axis.ticks = element_blank()) +
+   theme(legend.position = "none") +
+    ylab("SI score")
+ 
+p3 <- egg::set_panel_size( SI_C_plot, width=unit(length(unique(SI_C$SampleID))/1.75, "mm"),
+                          height=unit(3, "mm"), margin = unit(0.1, 0.1,0.1,0.1, "mm") )
+
+
+
+ SI_BD_plot <- 
+   SI_BD %>% 
+   mutate(gene_id= "SI_sample") %>% 
+   ggplot(aes(x=SampleID, y=gene_id)) + 
+     geom_raster(aes(fill=SI)) + 
+     scale_fill_stepsn(colours = c("#FFFFFF",  "#D6604D", "#B2182B"),
+                     #  breaks = c(0, 0.15, 0.2, 0.28), limits=c(0,0.5))   +
+              breaks = c(0, 0.8, 1.2), limits=c(0,3))   +
+   theme(axis.text.x= element_blank()) +
+   theme(axis.text.y= element_blank()) +
+   theme(axis.title = element_blank()) +
+    theme(axis.ticks = element_blank())+
+      theme(legend.title = element_blank()) 
+
+ 
+p4 <- egg::set_panel_size( SI_BD_plot, width=unit(length(unique(SI_BD$SampleID))/1.75, "mm"),
+                          height=unit(3, "mm"), margin = unit(0.1, 0.1,0.1,0.1, "mm") )
+
+
+
+ggsave(plot =p1, filename = paste0(dir,"C_sWSR.pdf") )
+ggsave(plot =p2, filename = paste0(dir,"BD_sWSR.pdf") )
+
+ggsave(plot =p1, filename = paste0(dir,"C_sWSR.tiff") )
+ggsave(plot =p2, filename = paste0(dir,"BD_sWSR.tiff") )
+
+ggsave(plot =p1, filename = paste0(dir,"C_sWSR_thr2.tiff") )
+ggsave(plot =p2, filename = paste0(dir,"BD_sWSR_thr2.tiff") )
+
+ggsave(plot =p3, filename = paste0(dir,"C_sWSR_SI.pdf") )
+ggsave(plot =p4, filename = paste0(dir,"BD_sWSR_SI.pdf") )
+ggsave(plot =p3, filename = paste0(dir,"C_sWSR_SI.tiff") )
+ggsave(plot =p4, filename = paste0(dir,"BD_sWSR_SI.tiff") )
+
+
+```
+
+
+
+When all 4 cortical sets are done - cross validation and predicted probabilities
+
+```{r logistic regression based on sWSR sWSR split by dataset}
+#import sWSR data
+
+# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC_HBCC/sWSR/sWSR.txt")
+# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-Pitt/sWSR/sWSR.txt")
+# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/GVEX-SMRI/sWSR/sWSR.txt")
+# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/BipSeq-sACC/sWSR/sWSR.txt")
+# 
+# 
+# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CMC-HBCC/sWSR/sWSR.txt")
+# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CMC-Pitt/sWSR/sWSR.txt")
+# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/GVEX-SMRI/sWSR/sWSR.txt")
+# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/BipSeq-sACC/sWSR/sWSR.txt")
+# 
+# 
+# 
+# #"old" sWSR values, to test the new version of the code.
+# # sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/wsr/wsr_t.txt")
+# # sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_unstr/Pitt/wsr/wsr_t.txt")
+# # sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BrainGVEX/06_lasso_model/results/RPKM/high_L2G_nearest/wsr/wsr_t.txt") 
+# # sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BipSeq/06_lasso_model/RPKM/sACC/wsr/wsr_t.txt")
+# # 
+# 
+# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CMC-HBCC/sWSR/sWSR.txt")
+# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CMC-Pitt/sWSR/sWSR.txt")
+# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/GVEX-SMRI/sWSR/sWSR.txt")
+# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/BipSeq-sACC/sWSR/sWSR.txt")
+
+sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
+sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
+sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
+sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
+
+```
+
+```{r combine sWSR}
+sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
+                                 "CMC-Pitt" = sWSR_CMC_Pitt,
+                                "GVEX-SMRI"= sWSR_GVEX_SMRI,  
+                                "BipSeq-sACC"= sWSR_BipSeq_sACC, 
+                                 .id = "Set")
+
+sWSR_all <- sWSR_all %>% drop_na(sWSR)
+sWSR_wide <- 
+  sWSR_all %>% 
+  select(Set, gene_id, SampleID, PrimaryDiagnosis, sWSR) %>% 
+  pivot_wider(names_from = gene_id, values_from = sWSR)
+
+sWSR_wide <- sWSR_wide %>%  select_if(~ !any(is.na(.))) # remove genes with missing values. EBLN3P is not in GVEX
+sWSR_wide <- sWSR_wide %>% drop_na() #remove samples with missing values (probably REDUNDANT now)
+
+sWSR_wide$PrimaryDiagnosis <- factor(sWSR_wide$PrimaryDiagnosis, levels = c("HC", "BD"))
+```
+
+```{r combine SI plots density and ROC}
+#calculate SI
+SI_sWSR_all <- sWSR_all %>% 
+ drop_na() %>%  #when all models have R2=0 for a gene, then res will be 0 and SI NA
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup() %>% 
+  select(SampleID, PrimaryDiagnosis, SI, Set) %>%
+  distinct()
+
+SI_sWSR_all$Set <- factor(SI_sWSR_all$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))
+SI_sWSR_all$PrimaryDiagnosis <- factor(SI_sWSR_all$PrimaryDiagnosis, levels = c("HC", "BD"))
+
+
+SI_sWSR_all_dens <- 
+  SI_sWSR_all %>% 
+  ggplot(aes(x=SI, colour=PrimaryDiagnosis)) + 
+  geom_density() +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  theme(legend.position = "none",
+        strip.background.x  = element_rect(fill  = "white"),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+        ) +
+  labs(x= "SI score", y= "Density") +
+    facet_wrap(~ Set, nrow = 1,scales = "free_x") +
+    scale_x_continuous( breaks= c(0, 0.5, 1, 1.5), limits = c(0,2) ) 
+
+#ggsave(SI_sWSR_all_dens, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/SI_dens_all_adjX.pdf", width = 9, height = 4.2, units= "cm")
+
+ggsave(SI_sWSR_all_dens, filename = paste0(dir, "SI_dens_all_adjX.pdf"), width = 9, height = 4.2, units= "cm")
+
+pROC_obj <- list()
+
+for(dataset in c("CMC-HBCC",    "CMC-Pitt" ,   "GVEX-SMRI",   "BipSeq-sACC" )){
+  
+  SI_sWSR <- SI_sWSR_all %>% filter(Set== dataset)
+  
+    # ROC calculations
+  pROC_obj[[dataset]] <- pROC::roc(
+    response= SI_sWSR$PrimaryDiagnosis, 
+    predictor= SI_sWSR$SI, 
+    levels= c("HC", "BD") ,
+   direction= "<" #force the direction, i.e higher score for cases
+)
+}
+
+# Applying the auc function to all the ROC curves
+AUC_all <- sapply(pROC_obj, auc)
+write.csv(AUC_all, paste0(dir, "AUC_all.txt"))
+
+
+colours <- brewer.pal(n= 4, name = "Dark2")
+
+# Plotting ROC curves
+ROC_SI <- 
+  ggroc(pROC_obj, aes= c("color", "alpha") )  +
+  coord_cartesian(xlim= c(1,0), ylim= c(0,1)) +
+  scale_color_manual(values= c(
+    "CMC-HBCC" = "black", 
+    "CMC-Pitt" = colours[1], 
+    "GVEX-SMRI"= colours[2] ,  
+    "BipSeq-sACC"= colours[3]
+  )) +
+  scale_alpha_manual(values= c(
+    "CMC-HBCC" = 1, 
+    "CMC-Pitt" = 0.5, 
+    "GVEX-SMRI"= 0.5 ,  
+    "BipSeq-sACC"= 0.5
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.68, 0.22),
+    # legend.position = "none",
+    legend.direction = "vertical",
+    legend.key.size = unit(2, "mm"),
+    legend.background=element_rect(colour= "white"),
+    legend.text = element_text(size=5),
+    legend.margin = margin(0.2, 0.2, 0.2, 0.2, unit= "mm" )
+  ) +
+  geom_abline(slope= 1, intercept= 1, linetype= "dashed", alpha=0.2, colour= "black") +
+  xlab("Specificity") +
+  ylab("Sensitivity")
+
+
+ggsave(plot =ROC_SI, filename = paste0(dir,"ROC_SI.pdf"), width = 43, height = 43, units = "mm" )
+
+
+
+```
+
+
+
+
+```{r logistic regression with cross validation}
+#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CV_prob/"
+#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/CV_prob/"
+#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/CV_prob/"
+#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CV_prob/"
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CV_prob/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CV_prob/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/keep_TRPT1_LMAN2L/CV_prob/")
+
+
+pROC_obj <- list()
+glm_sWSR_4datasets <- list()
+sWSR_wide_testset <- list()
+pos_pred <- list() #positive predicted value
+
+# Iterating over subsets to run logistic regression to predict diagnosis probabilities
+# In each iteration, pick one set as test (predict probabilites) and the other 3 will be used to fit the logistic regression
+for(testset in c("CMC-HBCC",    "CMC-Pitt" ,   "GVEX-SMRI",   "BipSeq-sACC" )){
+  # Defining the test set
+  sWSR_wide_test <- sWSR_wide[sWSR_wide$Set == testset,] # removing all rows that don't belong to the test set
+  sWSR_wide_test <- sWSR_wide_test[, !colnames(sWSR_wide_test) %in% "Set"] #removing the Set column (no longer needed bcse working on one Set at a time)
+
+  cat("\nTestset:")
+  print(testset)
+  cat("\n")
+  
+  #sanity check
+cat("Dimensions of set used as test")
+print(dim(sWSR_wide_test))
+
+
+  # Defining the 3 modeling sets for logistic regression fitting
+  sWSR_wide_set <- sWSR_wide[sWSR_wide$Set != testset,]
+  sWSR_wide_set <- sWSR_wide_set[, !colnames(sWSR_wide_set) %in% "Set"] #remove Set column
+  sWSR_wide_set <- sWSR_wide_set[, !colnames(sWSR_wide_set) %in% "SampleID"] #remove SampleID column
+
+    #sanity check
+cat("Dimensions of set used for modelling")
+print(dim(sWSR_wide_set))
+
+cat("\n total samples= ")
+print(length(rownames(sWSR_wide_test)) + length(rownames(sWSR_wide_set)) )
+   
+  # Logistic regression
+  glm_sWSR_set <- glm(PrimaryDiagnosis ~ . , data= sWSR_wide_set , family = "binomial")
+  
+  # Collecting the 4 logistic regressions.
+  glm_sWSR_4datasets[[testset]] <- glm_sWSR_set
+  
+  # Get the predicted diag from the model
+  probabilities <- predict.glm(
+    object = glm_sWSR_set, 
+    newdata = sWSR_wide_test, 
+    type = "response")
+
+cat("Mean correctly predicted class")
+  predicted.classes <- ifelse(probabilities > 0.5, "BD", "HC")
+  print(mean(predicted.classes == sWSR_wide_test$PrimaryDiagnosis))
+  
+  TP = length(predicted.classes[ predicted.classes == "BD" & predicted.classes == sWSR_wide_test$PrimaryDiagnosis])
+  FP = length(predicted.classes[predicted.classes == "BD" & predicted.classes != sWSR_wide_test$PrimaryDiagnosis])
+
+  pos_pred[[testset]] <- TP/(TP+FP)
+  
+  sWSR_wide_test$prob <- probabilities
+  sWSR_wide_testset[[testset]] <- sWSR_wide_test
+  
+    # ROC calculations
+  pROC_obj[[testset]] <- pROC::roc(
+    response= sWSR_wide_test$PrimaryDiagnosis, 
+    predictor= probabilities, 
+    levels= c("HC", "BD") ,
+   direction= "<" #force the direction, i.e higher score for cases
+)
+}
+
+# Applying the auc function to all the ROC curves
+AUC_all <- sapply(pROC_obj, auc)
+write.csv(AUC_all, paste0(dir, "AUC_all.txt"))
+
+# save positive predicted values
+pos_pred_all <- do.call(rbind, pos_pred)
+colnames(pos_pred_all) <- "PPV"
+
+#save all probabilitites after regression with the 3 other cortical sets
+sWSR_prob <- do.call(rbind, sWSR_wide_testset)
+
+
+#add Set info to probabilities
+sWSR_prob <- sWSR_prob %>% 
+  select(SampleID, PrimaryDiagnosis, prob) %>% 
+  left_join(select(info_all, SampleID, Set), by= "SampleID")
+
+sWSR_prob$Set <- factor(sWSR_prob$Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
+```
+
+```{r plot ROC curves}
+
+colours <- brewer.pal(n= 4, name = "Dark2")
+
+# Plotting ROC curves
+ROC_glm_CV_sWSR <- 
+  ggroc(pROC_obj, aes= c("color", "alpha") )  +
+  coord_cartesian(xlim= c(1,0), ylim= c(0,1)) +
+  scale_color_manual(values= c(
+    "CMC-HBCC" = "black", 
+    "CMC-Pitt" = colours[1], 
+    "GVEX-SMRI"= colours[2] ,  
+    "BipSeq-sACC"= colours[3]
+  )) +
+  scale_alpha_manual(values= c(
+    "CMC-HBCC" = 1, 
+    "CMC-Pitt" = 0.5, 
+    "GVEX-SMRI"= 0.5 ,  
+    "BipSeq-sACC"= 0.5
+  )) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = c(0.68, 0.22),
+    # legend.position = "none",
+    legend.direction = "vertical",
+    legend.key.size = unit(2, "mm"),
+    legend.background=element_rect(colour= "white"),
+    legend.text = element_text(size=5),
+    legend.margin = margin(0.2, 0.2, 0.2, 0.2, unit= "mm" )
+  ) +
+  geom_abline(slope= 1, intercept= 1, linetype= "dashed", alpha=0.2, colour= "black") +
+  xlab("Specificity") +
+  ylab("Sensitivity")
+
+
+ggsave(plot =ROC_glm_CV_sWSR, filename = paste0(dir,"ROC_glm_CV_sWSR.pdf"), width = 43, height = 43, units = "mm" )
+
+```
+
+```{r plot WSR boxplots}
+plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
+
+p <- 
+  sWSR_all %>%
+filter( gene_id %in% plot_genes) %>%
+ggplot(aes(x = PrimaryDiagnosis, y = wsr, color = PrimaryDiagnosis)) +
+  theme_bw() +
+  geom_boxplot(outlier.shape = NA, colour="black") +
+  geom_jitter(size=0.1,width = 0.2)  +
+  facet_grid(factor(gene_id, levels= plot_genes) ~ factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC")),
+             scales = "free_y") +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  scale_x_discrete(breaks=c(0,1), labels=c("HC", "BD")) +
+  theme(text = element_text(size=5),
+        legend.position="none",
+        axis.ticks = element_blank(),
+        strip.background.y  = element_rect(fill  = "#F4A582"),
+         strip.background.x  = element_rect(fill  = "white")) + 
+    xlab("") + ylab("") +
+  coord_cartesian(ylim = c(-0.1, 0.12)) +
+                    scale_y_continuous(
+       labels = label_number(accuracy = 0.1)
+  )
+
+p_blue <- 
+  p + theme(strip.background.y = element_rect(fill  = "#92C5DE")) + coord_cartesian(ylim = c(-0.2, 0.15)) 
+p_white <- 
+  p + theme(strip.background.y = element_rect(fill  = "white")) + coord_cartesian(ylim = c(-0.25, 0.25)) 
+
+
+ ggsave(plot=p, path = dir, filename = "compare_WSR_BD_HC_redstrip.pdf", width = 9, height = 10.48, units = "cm")
+  ggsave(plot=p_blue, path = dir, filename = "compare_WSR_BD_HC_bluestrip.pdf", width = 9, height = 10.48, units = "cm")
+  ggsave(plot=p_white, path = dir, filename = "compare_WSR_BD_HC_whitestrip.pdf", width = 9, height = 10.48, units = "cm")
+
+```
+
+
+
+
+```{r investigating the predicted probabilities further}
+sWSR_prob_wilcox <- sWSR_prob %>%  group_by(Set) %>% wilcox_test(prob ~ PrimaryDiagnosis, ref.group = "HC")
+
+
+#get summary data from models in previous chunk
+summary_all <- lapply(glm_sWSR_4datasets, summary)
+
+#save the coefficients from all datasets, creating a column with set name
+coeff_all <- lapply(seq_along(summary_all), #start the function for each element of list
+                    function(i) summary_all[[i]]$coefficients %>%  #define function, "i" is undefined and becomes the number of the list elements currently worked on.
+    as_tibble(rownames= "variable") %>%    
+    arrange(desc(abs(Estimate))) %>%
+    mutate(Set = names(summary_all)[[i]]))
+ #combine into one df
+coeff_all_df <- do.call(rbind, coeff_all)
+coeff_all_wide <- coeff_all_df %>%   pivot_wider( names_from = Set, id_cols = variable, values_from = c( Estimate, `Std. Error`, `z value`,    `Pr(>|z|)`)) 
+
+write.csv(coeff_all_df, paste0(dir, "coeff_all_df.txt"))
+write_tsv(coeff_all_wide, paste0(dir, "coeff_all.txt"))
+
+write.csv(pos_pred_all, paste0(dir, "PPV.txt"))
+
+#visualize density of predicted probabilities by diagnosis
+prob_glm_diag <- 
+sWSR_prob %>%  
+  ggplot(aes(x=prob, colour= PrimaryDiagnosis)) + 
+  geom_density() +  
+    facet_wrap(~Set, nrow = 1) + 
+  scale_colour_manual(values=rev(cols)) +
+  geom_vline(xintercept = 0.5, linetype= "dashed", alpha= 0.3)+ 
+  scale_x_continuous(limits=c(0,1), breaks= c(0, 1) ) +
+  scale_y_continuous( breaks = c(0, 1, 2), minor_breaks = seq(0, 2, 0.5))+
+  theme(
+    legend.position = "none",
+    strip.background  = element_rect(fill  = "white"),
+    strip.text = element_text(size=6, 
+                              margin = margin(1,1,1,1, "mm")
+    ),
+    axis.text.y = element_blank(),
+    axis.ticks.y =  element_blank() 
+  ) +
+  xlab("Predicted probabilities" )+
+  ylab("Density")
+
+
+#calculate the explanatory power of probability, r2l
+
+r2l_prob <- list()
+for(testset in c("CMC-HBCC",    "CMC-Pitt" ,   "GVEX-SMRI",   "BipSeq-sACC")){
+  
+  # logistic regression
+  prob_glm <- glm(PrimaryDiagnosis ~ prob, data= sWSR_prob[sWSR_prob$Set == testset,], family = "binomial")
+  pseudoR2 <- nagelkerke(prob_glm)
+  
+  
+  if (pseudoR2$Pseudo.R.squared.for.model.vs.null[3] <= 0) { #skip the liability scaling if pseudoR2 is below zero
+    next
+  }
+  
+  
+  frac_BD <- sWSR_prob %>%  filter(Set== testset) %>%  group_by(PrimaryDiagnosis) %>% summarise(n=n()) %>%  mutate(frac= n/sum(n)) %>% filter(PrimaryDiagnosis=="BD") %>% select(frac)
+  
+  r2l <- result_h2l(k=0.02, p=frac_BD$frac, r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+  )
+  print(pseudoR2$Pseudo.R.squared.for.model.vs.null[3])
+  r2l_prob[[testset]]      <- r2l
+}
+
+r2l_prob_all <- sapply(r2l_prob, cbind)
+write.csv(r2l_prob_all, paste0(dir, "r2l_prob_all.txt"))
+write_tsv(sWSR_prob_wilcox, paste0(dir, "sWSR_prob_wilcox.txt"))
+write_tsv(sWSR_prob, paste0(dir, "sWSR_prob.txt"))
+ggsave(prob_glm_diag, filename = paste0(dir, "prob_glm_diag.pdf"), width = 9.0, height = 4.2, units = "cm")
+
+gene_list <- subset[subset %in% colnames(sWSR_wide)]
+write.csv(gene_list, paste0(dir, "gene_list.txt"))
+
+```
+
+
+FInd genes where sWSR has predictive power, glm() on sWSR all cortical sets
+```{r glm on sWSR all cortical sets}
+sWSR_wide <- sWSR_wide %>% select(-Set, -SampleID)
+
+glm_sWSR <- glm(PrimaryDiagnosis ~ . , data= sWSR_wide , family = "binomial")
+summary_glm_sWSR_all <- summary(glm_sWSR)
+
+glm_sWSR_all_coefficients <- summary_glm_sWSR_all$coefficients %>%  as_tibble(rownames= "variable") %>%    arrange(desc(abs(Estimate)))
+
+write_tsv(glm_sWSR_all_coefficients, paste0(dir, "glm_sWSR_all_coefficients.txt"))
+
+```
+
+
+
+```{r plot sWSR DE}
+order.CMC_HBCC.gene_id <- read.csv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/order.CMC_HBCC.gene_id.txt") #as calculated from correlation matrix in DE_absolute_v08.Rmd
+order.CMC_HBCC.gene_id <- order.CMC_HBCC.gene_id$x
+
+
+stat.test_all<-
+  sWSR_all %>% 
+  #filter(wsr !=0) %>%  #wilcox test cannot handle many zero values well
+  group_by(Set, gene_id) %>% 
+  wilcox_test(data= ., formula = wsr ~ PrimaryDiagnosis, ref.group  = "HC" ) %>% 
+  adjust_pvalue(method = "BH") %>% 
+  mutate(y.position = 0.07) %>% 
+  mutate(p.adj= round(p.adj, digits = 6))
+
+stat.test_all$gene_id <- as.character(stat.test_all$gene_id)
+
+#for Wilcoxon test, we need to calculate the direction in median difference 
+p_thr <- 0.15#threshold for colour in tile
+#p_thr <- 0.05 #only colour at least nominally significant
+
+wsr_median <- 
+  sWSR_all %>% 
+    group_by(gene_id, Set, PrimaryDiagnosis) %>% 
+    mutate(median= median(wsr)) %>% 
+    ungroup() %>% 
+  select(Set, gene_id, PrimaryDiagnosis, median) %>%  distinct() %>%
+    group_by(gene_id, Set) %>% 
+  pivot_wider( names_from = PrimaryDiagnosis, values_from = median) %>% 
+  mutate(median_diff = BD- HC) %>% 
+  left_join(select(stat.test_all, Set, gene_id, p, p.adj), by=c("Set", "gene_id")) %>% 
+  mutate(direction_diff = case_when(
+    median_diff > 0 & p < p_thr ~ "pos",
+    median_diff < 0 & p < p_thr ~ "neg",
+    TRUE ~ "no_diff"
+  )) %>%  
+  ungroup() %>%  distinct()
+
+
+#combine data
+stat.test_all <-
+  stat.test_all %>% 
+  left_join(select(wsr_median, gene_id, Set, median_diff, direction_diff), by= c("Set", "gene_id")) 
+
+stat.test_all <- stat.test_all %>% drop_na() 
+
+
+
+stat.test_all$Set <- factor(stat.test_all$Set, levels= c("CMC-HBCC","CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
+
+stat.test_all <- stat.test_all %>% mutate(sign = case_when(p.adj<= 0.05 ~ "FDR",
+                                                           p <= 0.05 & p.adj>= 0.05 ~ "p",
+                                                           TRUE ~ "none"))
+
+
+stat.test_all$gene_id <- factor(stat.test_all$gene_id, levels=order.CMC_HBCC.gene_id)
+stat.test_all <- stat.test_all %>% drop_na() 
+
+statistic <- 
+  ggplot(data=stat.test_all, aes(x=Set, y=gene_id)) + 
+   geom_tile(aes(fill=direction_diff)) +   
+         scale_fill_manual(values = c("pos" = "#F4A582", "neg" = "#92C5DE", "no_diff" = "#f7f7f7") #for wilcoxon 
+                           ) +
+     geom_point(data=stat.test_all, aes(size=sign, alpha=sign)) +
+     scale_size_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+   scale_alpha_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+      theme(legend.title = element_blank())+
+    labs(title = "" ) +
+  theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(size = 5, vjust=1, angle= 60, hjust = 0.9),
+          axis.text.y = element_text(size = 5, hjust=1),
+          axis.ticks = element_blank(),
+          legend.position = "none",
+          axis.line = element_line(color='black', size = 0.2),
+          panel.border = element_rect(colour = "black", fill=NA, size=0.2)
+          ) + 
+    scale_y_discrete() +
+ scale_x_discrete(position="top") +
+    theme(axis.text.x = element_text(hjust = 0.1, vjust= 1)) +
+    ylab("") +
+  xlab("")+
+     geom_hline(yintercept=seq(1.5, length(unique(stat.test_all$gene_id))+1, 1), 
+             lwd=0.1, colour="gray")# Horizonal lines
+
+  
+  
+  
+  ggsave(statistic, filename = paste0(dir, "sWSR_statistic_all_sets.pdf"),  width=4.9, height= 11.75, units="cm")
+  ggsave(statistic, filename = paste0(dir, "sWSR_statistic_all_sets_pthr_0.15.pdf"),  width=4.9, height= 11.75, units="cm")
+```
+
+
+```{r polygenic architecture genes per ind}
+thr <- 2
+
+#count how many samples have disruption at +/- thr sd for genes
+   SI2_number_thr<- sWSR_all  %>% 
+    group_by(SampleID) %>% 
+    mutate(sd_thr =  abs(sWSR) > thr) %>% add_tally(wt=sd_thr) %>%  
+    select(SampleID,  PrimaryDiagnosis, n, Set) %>% distinct() 
+
+   #insert median count by Set and diagnosis
+  SI2_number_thr <- SI2_number_thr  %>% group_by(Set, PrimaryDiagnosis) %>%  mutate(median_n= median(n)) %>% ungroup() 
+   
+   SI2_number_GENEperIND_thr_combined <- 
+SI2_number_thr  %>% group_by(Set, PrimaryDiagnosis) %>%  mutate(median_n= median(n)) %>% ungroup() %>% ggplot() + 
+    geom_line(aes(x=n, color=Set, alpha=Set), stat="density") + 
+      geom_vline(data=filter(SI2_number_thr, Set=="CMC-HBCC"), aes(xintercept = median_n), linetype = "dashed", alpha =0.3)+ #line with CMC-HBCC median
+    facet_grid(cols =vars(PrimaryDiagnosis))+
+    scale_color_manual(values= c(
+        "CMC-HBCC" = "black", 
+        "CMC-Pitt" = colours[1], 
+        "GVEX-SMRI"= colours[2] ,  
+        "BipSeq-sACC"= colours[3]
+    )) +
+    scale_alpha_manual(values= c(
+        "CMC-HBCC" = 1, 
+        "CMC-Pitt" = 0.5, 
+        "GVEX-SMRI"= 0.5 ,  
+        "BipSeq-sACC"= 0.5
+    )) +
+    theme(legend.position = "none",
+          strip.background  = element_blank()
+ 
+     #     strip.background  = element_rect(fill  = "white" )
+          ) + 
+    xlab("Number of imbalanced genes per individual") +
+    ylab("Density (individuals)") +
+    coord_cartesian(xlim = c(0, 15), ylim = c(0, 0.3))
+   
+    ggsave(SI2_number_GENEperIND_thr_combined , filename = paste0(dir, "GENEperIND.pdf") , height=4.3, width=8, units = "cm")
+```
+
+
+```{r polygenic architecture ind per gene}
+
+sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
+                                  "CMC-Pitt" = sWSR_CMC_Pitt,
+                                 "GVEX-SMRI"= sWSR_GVEX_SMRI,  
+                                 "BipSeq-sACC"= sWSR_BipSeq_sACC, 
+                                  .id = "Set")
+sWSR_samples <- sWSR_all %>% select(Set, SampleID, PrimaryDiagnosis) %>%  distinct() %>% group_by(Set, PrimaryDiagnosis) %>% mutate(n_ind= n()) %>% select(-SampleID) %>%   distinct() 
+
+
+#SI_genes should be based on significance of coefficients in the logistic regression of all datasets
+#We should see what the plot looks like with those 12 genes, but also perhaps consider setting the cutoff at 10% which would lead to 20 genes.
+
+SI_genes <- glm_sWSR_all_coefficients %>%  filter(variable %in% subset, `Pr(>|z|)` < 0.05) %>% select(variable) %>% rename("gene_id" = variable)
+#SI_genes <- glm_sWSR_all_coefficients %>%  filter(variable %in% subset, `Pr(>|z|)` < 0.10) %>% select(variable) %>% rename("gene_id" = variable)
+
+
+#base top rank on significant coefficients in regression of 4 cortical sets
+ sWSR_all <- sWSR_all %>% 
+   mutate(SI_gene =
+            ifelse(
+              gene_id %in% SI_genes$gene_id, "top_rank",
+              "Not_top_rank"
+            ))
+
+
+###extreme sWSR values: Individuals per gene
+
+SI2_INDperGENE_thr_SI_genes <- 
+  sWSR_all %>% 
+  filter(SI_gene == "top_rank") %>% 
+   left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+   group_by(Set, gene_id, PrimaryDiagnosis) %>% 
+   mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+   add_tally(wt=sd_thr) %>%  
+    select(gene_id,  PrimaryDiagnosis, n, n_ind, Set, SI_gene) %>% distinct() %>% 
+  mutate(n_norm = n/n_ind ) 
+
+SI2_INDperGENE_thr_not_SI_genes <- 
+  sWSR_all %>% 
+  filter(SI_gene == "Not_top_rank") %>% 
+   left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+   group_by(Set, gene_id, PrimaryDiagnosis) %>% 
+   mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+   add_tally(wt=sd_thr) %>%  
+    select(gene_id,  PrimaryDiagnosis, n, n_ind, Set, SI_gene) %>% distinct() %>% 
+  mutate(n_norm = n/n_ind ) 
+
+SI2_INDperGENE_thr <- bind_rows(top_rank = SI2_INDperGENE_thr_SI_genes, Not_top_rank= SI2_INDperGENE_thr_not_SI_genes, .id= "SI_gene" )
+
+ 
+ 
+SI2_prop_INDperGENE_thr_split <-
+  SI2_INDperGENE_thr %>% 
+  ggplot(aes(x=n_norm)) + 
+      geom_line(data = filter(SI2_INDperGENE_thr, PrimaryDiagnosis== "HC"), aes(color=Set, alpha=Set), stat="density") + 
+    geom_line(data = filter(SI2_INDperGENE_thr, PrimaryDiagnosis== "BD"),aes(color=Set, alpha=Set), stat="density") + 
+ facet_grid(
+    #rows=vars(PrimaryDiagnosis), 
+             cols =  vars(factor(SI_gene, levels=c('top_rank', 'Not_top_rank'))),
+           scales = "free_y") +
+    scale_color_manual(values= c(
+    "CMC-HBCC" = "black", 
+    "CMC-Pitt" = colours[1], 
+    "GVEX-SMRI"= colours[2] ,  
+    "BipSeq-sACC"= colours[3], 
+    "BipSeq-Amg"= colours[4]
+  )) +
+  scale_alpha_manual(values= c(
+    "CMC-HBCC" = 1, 
+    "CMC-Pitt" = 0.5, 
+    "GVEX-SMRI"= 0.5 ,  
+    "BipSeq-sACC"= 0.5, 
+    "BipSeq-Amg"= 0.5
+  )) +
+  theme(legend.position = "none",
+        #legend.position= c(0.8, 0.75),
+        # strip.background.x  = element_rect(fill  = "white" )
+        strip.background = element_blank( )
+        ) + 
+  xlab("Fraction of imbalanced individuals per gene") +
+  ylab("Density (genes)")
+
+
+#ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_SI_gene_sign_coeff0.10.pdf"), width=8, height=4.3, units = "cm" )
+ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_SI_gene_sign_coeff0.05.pdf"), width=8, height=4.3, units = "cm" )
+
+```
+
+
+```{r rank genes based on BD wsr_t}
+
+sum_sWSR_gene <- sWSR_all %>%
+  filter(PrimaryDiagnosis == "BD") %>% 
+  group_by(Set, gene_id) %>% 
+  mutate(sum_sWSR = sum(abs(sWSR))) %>% 
+  select(gene_id, Set, sum_sWSR) %>% 
+  ungroup() %>% 
+  distinct() %>%
+  group_by(Set) %>% 
+  arrange(desc(sum_sWSR)) %>% 
+  ungroup()
+  
+
+#gene_order_t <- factor(sum_sWSR_gene$gene_id, levels = sum_sWSR_gene$gene_id)
+
+```
+
+```{r increasing genes AUC based on sWSR}
+
+#dataset = "CMC-HBCC"
+
+auc_GOI <- list()
+gene_rank <- list()
+
+for(dataset in c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC") ){
+  
+  gene_order_t <- sum_sWSR_gene %>%  filter(Set== dataset) %>% select(gene_id)
+  gene_order_t <- factor(gene_order_t$gene_id, levels = gene_order_t$gene_id)
+
+SI_incr <- list()
+SI_ttest_incr <- list()
+SI_glm_incr <- list()
+r2l_incr <- list()
+pROCs_GOI_incr <- list()
+  
+for(genes in seq(from=1, to=length(gene_order_t), by= 1)){ 
+  #nonsense with only 1 gene. From 2 to all modelled genes in the SI calculation
+GOI <- gene_order_t[1:genes]
+#calculate SI
+
+SI <- sWSR_all %>% 
+  filter(Set == dataset) %>% 
+  filter(gene_id %in% GOI) %>% 
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% 
+  ungroup()
+
+
+SI$PrimaryDiagnosis <- as.factor(SI$PrimaryDiagnosis)
+
+SI_incr[[genes]] <- SI
+
+cat("genes included in SI score:")
+print(length(GOI))
+
+
+
+#SI_ttest_incr[[genes]] <- wilcox.test(SI ~ PrimaryDiagnosis, data = SI)
+SI_glm_incr[[genes]] <- glm(PrimaryDiagnosis ~ SI, data= as.data.frame(SI), family = "binomial")
+
+
+#get pseudo R2 from the regression
+pseudoR2 <- nagelkerke(SI_glm_incr[[genes]])
+ r2l_incr[[genes]] <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <-  roc(SI$PrimaryDiagnosis,SI$SI,
+                 levels = c("HC", "BD"),
+               direction= "<", #should the cases have lower SI, we need to change the direction here
+            smoothed = TRUE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+pROCs_GOI_incr[[genes]] <- pROC_obj
+
+}
+
+
+auc_GOI_set <- pROCs_GOI_incr[1:length(gene_order_t)] %>% map_chr("auc")
+
+auc_GOI_set <- as_tibble(auc_GOI_set) %>% 
+  mutate("genes_in_SI"= seq(from=1, to=length(gene_order_t), by= 1)) %>% 
+ rename("auc"= value)
+
+auc_GOI_set$auc <- as.numeric(as.character(auc_GOI_set$auc))
+
+#save the current dataset and gene names into list
+auc_GOI[[dataset]] <- auc_GOI_set
+gene_rank[[dataset]] <- gene_order_t
+}
+
+#combine all sets into one tibble
+auc_GOI_all <- bind_rows(auc_GOI, .id= "Set" )
+
+
+gene_rank_all <- 
+  tibble::tibble(rank= gene_rank) %>% 
+  unnest_wider(  rank, names_sep = "") %>% 
+  mutate(Set = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC")) %>% 
+  pivot_longer(cols = -Set, names_to = "rank", values_to = "gene_id")
+
+auc_increasing_genes_sWSR_all  <- 
+    auc_GOI_all %>%  
+  ggplot(aes(x=genes_in_SI, y=auc, colour=Set, alpha=Set)) + 
+  geom_point(size= 0.2) + 
+  geom_line(aes(colour=Set, alpha= Set)) +
+    scale_color_manual(values= c(
+    "CMC-HBCC" = "black", 
+    "CMC-Pitt" = colours[1], 
+    "GVEX-SMRI"= colours[2] ,  
+    "BipSeq-sACC"= colours[3]
+  )) +
+  scale_alpha_manual(values= c(
+    "CMC-HBCC" = 1, 
+    "CMC-Pitt" = 0.3, 
+    "GVEX-SMRI"= 0.3 ,  
+    "BipSeq-sACC"= 0.3
+  )) +
+  theme(
+    legend.title = element_blank(),
+   #legend.position = c(.4, .2),
+   legend.position = "none",
+   legend.direction = "vertical",
+   legend.key.size = unit(2, "mm"),
+   legend.background=element_blank(),
+   legend.text = element_text()
+    ) +
+      geom_vline(xintercept = 15, linetype= "dashed", alpha= 0.3)+
+  ylab("AUC") + xlab("Nb of genes used for SI score") +
+  coord_cartesian(ylim= c(0.55, 0.80)) +
+  scale_x_continuous(limits = c(0, 53), breaks = c(0, 10, 20, 30, 40, 50))
+
+
+ggsave(plot =auc_increasing_genes_sWSR_all, filename = paste0(dir, "auc_increasing_genes_sWSR_all.pdf"), width = 43, height = 43, units = "mm" )
+
+```
+
+```{r SI score performance sWSR 15 top genes specific}
+#the genes are ranked according to sWSR SI in BD in the list gene_rank
+
+  setname <- list()
+  ttest_p_15best <- list()
+  AUC_15best <- list()  
+  r2l_15best <- list()
+  GOI_15best <- list()
+  SI_15best <- list()
+  
+  
+for(dataset in c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC")){
+
+#r SI score sWSR_15
+#select n best genes within set
+top_genes <- 10 
+  
+GOI <- gene_rank[[dataset]][1:top_genes]
+  
+
+
+  sWSR_all_set <- sWSR_all %>% 
+    filter(Set == dataset, gene_id %in% GOI)
+  
+  
+#calculate SI
+SI_sWSR_15genes_best_set <- sWSR_all_set %>% 
+    filter(gene_id %in% GOI) %>% 
+    group_by(SampleID) %>% 
+    mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+    ungroup() %>%  
+  select(SampleID, PrimaryDiagnosis,SI, Set) %>%  distinct() 
+
+SI_sWSR_15genes_best_set$PrimaryDiagnosis <- factor(SI_sWSR_15genes_best_set$PrimaryDiagnosis, levels= c("HC", "BD"))
+  
+BD <- SI_sWSR_15genes_best_set %>% filter(PrimaryDiagnosis=="BD") %>%  select(SampleID) %>%  distinct()
+HC <- SI_sWSR_15genes_best_set %>% filter(PrimaryDiagnosis=="HC") %>%  select(SampleID) %>%  distinct()
+
+SI_sWSR_15genes_best_set_ttest <- wilcox.test(SI ~ PrimaryDiagnosis, data = SI_sWSR_15genes_best_set)
+
+SI_sWSR_15genes_best_set_glm <- glm(PrimaryDiagnosis ~ SI, data= as.data.frame(SI_sWSR_15genes_best_set), family = "binomial")
+summary_sWSR_15genes_best <- summary(SI_sWSR_15genes_best_set_glm)
+
+#get pseudo R2 from the model
+pseudoR2_sWSR_15genes_best <- nagelkerke(SI_sWSR_15genes_best_set_glm)
+r2l_sWSR_15genes_best <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2_sWSR_15genes_best$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <- roc(SI_sWSR_15genes_best_set$PrimaryDiagnosis,SI_sWSR_15genes_best_set$SI,
+                 levels = c("HC", "BD"),
+               direction= "<", #should the cases have lower SI, we need to change the direction here
+            smoothed = TRUE,
+            # arguments for plot
+            plot=FALSE)
+
+AUC_15best[[dataset]] <- pROC_obj$auc
+ttest_p_15best[[dataset]] <- SI_sWSR_15genes_best_set_ttest$p.value
+r2l_15best[[dataset]] <- r2l_sWSR_15genes_best
+setname[[dataset]] <- dataset
+SI_15best[[dataset]] <- SI_sWSR_15genes_best_set
+}
+
+  results_15best_all <- bind_cols("Set" = unlist(setname), "w-test" = unlist(ttest_p_15best), "AUC"= unlist(AUC_15best), "R2"= unlist(r2l_15best))
+
+  
+ SI_all_15best <-  bind_rows("CMC-HBCC" = SI_15best$`CMC-HBCC`, "CMC-Pitt" = SI_15best$`CMC-Pitt`,  "GVEX-SMRI" = SI_15best$`GVEX-SMRI`, "BipSeq-sACC" =SI_15best$`BipSeq-sACC`, .id = "Set")
+ 
+
+
+```
+
+```{r save results 15 best within set}
+#save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/incr_gene_SI/15best/"
+
+save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/fix_lambda/incr_gene_SI/15best/"
+
+write_tsv(gene_rank_all, file = paste0(save_dir, "gene_rank_all.txt" ))
+write_tsv(SI_all_15best, file = paste0(save_dir, "SI_sWSR_15genes_best.txt" ))
+write_tsv(results_15best_all, file= paste0(save_dir, "results_15best.txt"))
+
+write_tsv(SI_all_15best, file = paste0(save_dir, "SI_sWSR_10genes_best.txt" ))
+write_tsv(results_15best_all, file= paste0(save_dir, "results_10best.txt"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r common rank based on BD sWSR}
+
+rank_common_sWSR <- sWSR_all %>% 
+  filter(PrimaryDiagnosis== "BD") %>% 
+  group_by(gene_id) %>% 
+  mutate(sWSR_mean_BD = mean(abs(sWSR)), na.rm= TRUE) %>% 
+  select(gene_id, sWSR_mean_BD) %>%  distinct() %>% 
+  ungroup() %>%  
+  arrange(desc(sWSR_mean_BD)) %>% 
+  mutate(rank = dense_rank(desc(sWSR_mean_BD)))
+
+
+
+```
+
+```{r increasing genes AUC based on sWSR common}
+gene_order_t <- factor(rank_common_sWSR$gene_id, levels = rank_common_sWSR$gene_id)
+
+auc_GOI <- list()
+gene_rank <- list()
+
+for(dataset in c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC") ){
+
+SI_incr <- list()
+SI_ttest_incr <- list()
+SI_glm_incr <- list()
+r2l_incr <- list()
+pROCs_GOI_incr <- list()
+  
+for(genes in seq(from=1, to=length(gene_order_t), by= 1)){ 
+  #nonsense with only 1 gene. From 2 to all modelled genes in the SI calculation
+GOI <- gene_order_t[1:genes]
+#calculate SI
+
+SI <- sWSR_all %>% 
+  filter(Set == dataset) %>% 
+  filter(gene_id %in% GOI) %>% 
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% 
+  ungroup()
+
+
+SI$PrimaryDiagnosis <- as.factor(SI$PrimaryDiagnosis)
+
+SI_incr[[genes]] <- SI
+
+cat("genes included in model:")
+print(length(GOI))
+
+
+
+#SI_ttest_incr[[genes]] <- wilcox.test(SI ~ PrimaryDiagnosis, data = SI)
+SI_glm_incr[[genes]] <- glm(PrimaryDiagnosis ~ SI, data= as.data.frame(SI), family = "binomial")
+
+
+#get pseudo R2 from the regression
+pseudoR2 <- nagelkerke(SI_glm_incr[[genes]])
+ r2l_incr[[genes]] <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <-  roc(SI$PrimaryDiagnosis,SI$SI,
+                 levels = c("HC", "BD"),
+               direction= "<", #should the cases have lower SI, we need to change the direction here
+            smoothed = TRUE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+pROCs_GOI_incr[[genes]] <- pROC_obj
+
+}
+
+
+auc_GOI_set <- pROCs_GOI_incr[1:length(gene_order_t)] %>% map_chr("auc")
+
+auc_GOI_set <- as_tibble(auc_GOI_set) %>% 
+  mutate("genes_in_SI"= seq(from=1, to=length(gene_order_t), by= 1)) %>% 
+ rename("auc"= value)
+
+auc_GOI_set$auc <- as.numeric(as.character(auc_GOI_set$auc))
+
+#save the current dataset and gene names into list
+auc_GOI[[dataset]] <- auc_GOI_set
+gene_rank[[dataset]] <- gene_order_t
+}
+
+#combine all sets into one tibble
+auc_GOI_all <- bind_rows(auc_GOI, .id= "Set" )
+gene_rank_all <- bind_rows(gene_rank, .id= "Set")
+
+auc_increasing_genes_common_sWSR_all  <- 
+    auc_GOI_all %>%  
+  ggplot(aes(x=genes_in_SI, y=auc, colour=Set, alpha=Set)) + 
+  geom_point(size= 0.2) + 
+  geom_line(aes(colour=Set, alpha= Set)) +
+    scale_color_manual(values= c(
+    "CMC-HBCC" = "black", 
+    "CMC-Pitt" = colours[1], 
+    "GVEX-SMRI"= colours[2] ,  
+    "BipSeq-sACC"= colours[3]
+  )) +
+  scale_alpha_manual(values= c(
+    "CMC-HBCC" = 1, 
+    "CMC-Pitt" = 0.3, 
+    "GVEX-SMRI"= 0.3 ,  
+    "BipSeq-sACC"= 0.3
+  )) +
+  theme(
+    legend.title = element_blank(),
+   #legend.position = c(.4, .2),
+   legend.position = "none",
+   legend.direction = "vertical",
+   legend.key.size = unit(2, "mm"),
+   legend.background=element_blank(),
+   legend.text = element_text()
+    ) +
+      geom_vline(xintercept = 15, linetype= "dashed", alpha= 0.3)+
+  ylab("AUC") + xlab("Nb of genes used for SI score") +
+  coord_cartesian(ylim= c(0.55, 0.80)) +
+  scale_x_continuous(limits = c(0, 53), breaks = c(0, 10, 20, 30, 40, 50))
+
+
+ggsave(plot =auc_increasing_genes_common_sWSR_all, filename = paste0(dir, "auc_increasing_genes_common_rank_sWSR_all.pdf"), width = 43, height = 43, units = "mm" )
+
+```
+
+
+
+
+
+```{r sWSR_15_common}
+#import sWSR
+sWSR_all %>%  head()
+
+#r SI score sWSR_15
+#gene order:
+#GOI <- rank_statistic_common$gene_id[1:15]
+GOI <- rank_common_sWSR$gene_id[1:15]
+
+
+#calculate SI
+SI_sWSR_15genes_common <- sWSR_all %>% 
+    filter(gene_id %in% GOI) %>% 
+    group_by(SampleID, Set) %>% 
+    mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+    ungroup() %>%  
+  select(SampleID, PrimaryDiagnosis, SI, Set) %>%  distinct() 
+
+#SI_sWSR_15genes_common <- rename(SI_sWSR_15genes_common, "PrimaryDiagnosis" = PrimaryDiagnosis)
+
+#keep only t-test, AUC and R2 liab. 
+
+  setname <- list()
+  ttest_p_15common <- list()
+  AUC_15common <- list()  
+  r2l_15common <- list()
+  
+for(set in c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC")){
+
+ 
+  SI_sWSR_15genes_common_set <- SI_sWSR_15genes_common %>% 
+    filter(Set == set)
+  
+BD <- SI_sWSR_15genes_common_set %>% filter(PrimaryDiagnosis=="BD") %>%  select(SampleID) %>%  distinct()
+HC <- SI_sWSR_15genes_common_set %>% filter(PrimaryDiagnosis=="HC") %>%  select(SampleID) %>%  distinct()
+
+SI_sWSR_15genes_common_set_ttest <- wilcox.test(SI ~ PrimaryDiagnosis, data = SI_sWSR_15genes_common_set)
+
+SI_sWSR_15genes_common_set_glm <- glm(PrimaryDiagnosis ~ SI, data= as.data.frame(SI_sWSR_15genes_common_set), family = "binomial")
+summary_sWSR_15genes_common <- summary(SI_sWSR_15genes_common_set_glm)
+
+#get pseudo R2 from the model
+pseudoR2_sWSR_15genes_common <- nagelkerke(SI_sWSR_15genes_common_set_glm)
+r2l_sWSR_15genes_common <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2_sWSR_15genes_common$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <- roc(SI_sWSR_15genes_common_set$PrimaryDiagnosis,SI_sWSR_15genes_common_set$SI,
+                 levels = c("HC", "BD"),
+               direction= "<", #should the cases have lower SI, we need to change the direction here
+            smoothed = TRUE,
+            # arguments for plot
+            plot=FALSE)
+
+AUC_15common[[set]] <- pROC_obj$auc
+ttest_p_15common[[set]] <- SI_sWSR_15genes_common_set_ttest$p.value
+r2l_15common[[set]] <- r2l_sWSR_15genes_common
+setname[[set]] <- set
+SI[[set]] <- set
+}
+
+  results_15common <- bind_cols("Set" = unlist(setname), "wilcox-test" = unlist(ttest_p_15common), "AUC"= unlist(AUC_15common), "R2"= unlist(r2l_15common))
+
+```
+
+```{r save results 15 common}
+
+
+write_tsv(SI_sWSR_15genes_common, file = paste0(dir, "SI_sWSR_15genes_common.txt" ))
+write_tsv(results_15common, file= paste0(dir, "results_15common.txt"))
+```
+
+
+
+
+```{r bar chart SI genes}
+library(tidytext)
+thr<- 2
+
+#ordered bar-chart to count how many samples are disrupted at +/- thr sd for genes. Identifies which genes they are
+#genes_ind_per_gene <- 
+
+sWSR_all$Set <- factor(sWSR_all$Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
+
+genes_SI_BD <- 
+  sWSR_all %>% 
+     left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+   group_by(Set, gene_id, PrimaryDiagnosis) %>% 
+   mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+   add_tally(wt=sd_thr) %>%      
+  select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>% 
+  mutate(n_norm = n/n_ind ) %>% 
+  filter(PrimaryDiagnosis== "BD") %>% 
+   ggplot(aes(x=reorder_within(x = gene_id, by = -n, within= Set))) + 
+    geom_col(aes(y=n_norm)) +
+  scale_x_reordered()+
+    theme(axis.text.x = element_text(angle=90, size = 6)) +
+    xlab("gene_id") + 
+    ylab(paste("Fraction BD samples with |sWSR| > 2")) +
+    theme(axis.text.x = element_text(size=5, hjust=1, angle = 90, vjust = 1.1),
+          strip.background.x  = element_rect(fill  = "white" )) + 
+    facet_wrap(vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free",
+               nrow= 3, ncol= 2)
+ #facet_grid(cols=vars(Set), scales= "free")# +
+ #facet_grid( rows=vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free")
+#+ coord_flip()
+  
+ggsave(genes_SI_BD, filename = paste0(dir, "genes_prop_thr_BD.pdf"), width= 18,  units= "cm")
+
+
+```
+
+```{r genes consistently imbalanced}
+
+#find top 10 imbalanced genes among BD cases
+#have tested- there is no difference to the results if all samples are included, since BD are the top anyway
+
+sWSR_all %>%
+left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+group_by(Set, gene_id, PrimaryDiagnosis) %>%
+mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+add_tally(wt=sd_thr) %>%
+select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>%
+mutate(n_norm = n/n_ind ) %>%
+filter(PrimaryDiagnosis== "BD") %>% arrange(desc(n_norm)) %>% group_by(Set) %>%  slice(1:10) %>% ungroup() %>%  count(gene_id) %>%  arrange(desc(n))
+
+#genes 3/4 imbalanced:
+#C15orf40 (not GVEX-SMRI)    
+#FKBP2      (Not CMC-Pitt)
+#PBRM1        (not BipSeq-sACC)
+```
+
+
+Look for batch effects in sWSR values between sets
+```{r PCA sWSR}
+sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
+sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
+sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
+sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
+
+sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
+                                 "CMC-Pitt" = sWSR_CMC_Pitt,
+                                "GVEX-SMRI"= sWSR_GVEX_SMRI,  
+                                "BipSeq-sACC"= sWSR_BipSeq_sACC, 
+                                 .id = "Set")
+
+sWSR_wide <- 
+  sWSR_all %>% 
+  select(Set, gene_id, SampleID, PrimaryDiagnosis, sWSR) %>% 
+  pivot_wider(names_from = gene_id, values_from = sWSR)
+
+sWSR_wide <- sWSR_wide %>%  select_if(~ !any(is.na(.))) # remove genes with missing values. EBLN3P is not in GVEX
+sWSR_wide <- sWSR_wide %>% drop_na() #remove samples with missing values (probably REDUNDANT now)
+
+sWSR_wide$PrimaryDiagnosis <- factor(sWSR_wide$PrimaryDiagnosis, levels = c("HC", "BD"))
+
+
+sWSR_wide <- sWSR_wide %>%  column_to_rownames(var= "SampleID")
+
+pca.sWSR_all <- prcomp(sWSR_wide[, -c(1,2)], center = TRUE, scale. = TRUE)
+plot(pca.sWSR_all$x)
+
+pca.PC1_PC2 <- as.data.frame(pca.sWSR_all$x[,1:2])
+
+pca.PC1_PC2_info <- 
+  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
+  left_join(info_all, by= "SampleID")
+
+pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
+
+pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
+
+#  mutate(outlier= ifelse(SampleID %in% remove_PCA, "outlier", "not outlier")) %>% 
+  PCA_sWSR_diag <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = PrimaryDiagnosis), 
+      size= 0.8
+    ) +
+      scale_color_manual(values = cols)
+   # scale_color_brewer(palette = "Dark2") 
+
+  
+    PCA_sWSR_set <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = Set), 
+      size= 0.8
+    ) +
+#      scale_color_manual(values = cols)
+   scale_color_brewer(palette = "Dark2") 
+
+
+   dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/"
+ggsave(plot= PCA_sWSR_set, filename = paste0(dir, "PCA_sWSR.pdf"), width = 89, height = 89, units = "mm")
+ggsave(plot= PCA_sWSR_diag, filename = paste0(dir, "PCA_sWSR_diag.pdf"), width = 89, height = 89, units = "mm")
+```
+
+Look for batch effects in expression values between sets
+
+```{r}
+subset <- high_L2G_closest$symbol
+
+rpkm_log_all_subset <- rpkm_log_all[rownames(rpkm_log_all) %in% subset,]
+
+rpkm_log_subset_t <- t(rpkm_log_all_subset)
+
+
+pca.rpkm_subset <- prcomp(rpkm_log_subset_t, center = TRUE, scale. = TRUE)
+plot(pca.rpkm_subset$x)
+
+pca.PC1_PC2 <- as.data.frame(pca.rpkm_subset$x[,1:2])
+
+pca.PC1_PC2_info <- 
+  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
+  left_join(info_all, by= "SampleID")
+
+pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
+
+pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
+
+   PCA_rpkm_subset_set <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = Set), 
+      size= 0.8
+    ) +
+#      scale_color_manual(values = cols)
+   scale_color_brewer(palette = "Dark2") 
+    
+    
+    ggsave(plot= PCA_rpkm_subset_set, filename = paste0(dir, "PCA_rpkm_subset_set.pdf"), width = 89, height = 89, units = "mm")
+    
+        ggsave(plot= PCA_rpkm_subset_set, filename = paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "PCA_rpkm_subset_res_set.pdf"), width = 89, height = 89, units = "mm")
+    
+```
+
+
+
+
+control experiment with HC vs HC
+
+
+
+```{r control experiment HC- HC analysis}
+dataset <- "CMC-HBCC"
+dataset <- "BipSeq-sACC"
+
+#split HBCC, BipSeq HC in 2, and run modelling and SI score analysis
+set.seed(22)
+#HBCC
+HC1 <- info_CM %>% filter(`PrimaryDiagnosis`=="HC", Study=="CMC_HBCC", Age>=18) %>% filter(!SampleID %in% remove_PCA) %>%
+  select(SampleID) %>% slice_sample(prop = 0.5, replace = FALSE)
+HC2 <- info_CM %>% filter(`PrimaryDiagnosis`=="HC", Study=="CMC_HBCC", Age>=18) %>% filter(!SampleID %in% remove_PCA) %>%
+  select(SampleID)  %>% filter(!SampleID %in% HC1$SampleID)
+
+#rpkm_log <- rpkm_CMC
+rpkm_log <- rpkm_log_CMC_HBCC
+
+rpkm_log <- rpkm_log_BipSeq_sACC
+info <- info_all %>%  filter(Set== dataset) 
+
+
+HC <- info %>% filter(PrimaryDiagnosis=="HC") %>% select(SampleID)
+set.seed(22) #1st round
+#set.seed(222) #2nd round
+#BipSeq sACC
+
+HC1 <- HC %>%  slice_sample(prop = 0.6, replace = FALSE) #more samples to the controls, since we have fewer in BipSeq than HBCC
+HC2 <- HC %>%  filter(!SampleID %in% HC1$SampleID)
+
+
+
+
+
+#Which variables (covarites) should be fixed?
+#for CMC, GVEX where ethnicity differs 
+   p.fac = rep(1, length(subset) -1 + 5) 
+    p.fac[1:5] = 0
+
+
+#for BipSeq where ethnicity does not differ
+    p.fac = rep(1, length(subset) -1 + 4) 
+    p.fac[1:4] = 0
+
+```
+
+```{r run iterations of lasso test HCvsHC}
+debug = TRUE
+
+subset <- subset[subset %in% rownames(rpkm_log)]
+subset <- unique(subset) 
+
+#RNAseq input is rpkm_log
+#SampleID are defined in
+#HC$SampleID 
+#HC2$SampleID
+#info
+
+it <- 200
+
+
+model_fraction <- length(HC1$SampleID) *0.9 
+
+# #2nd run: swap HC1 and HC2 
+# HC1_2 <- HC2
+# HC2_2 <- HC1
+# HC1 <- HC1_2
+# HC2 <- HC2_2
+
+#save the results from iterations to list
+res_std_HC1_iterate <- list()
+res_std_HC2_iterate<- list()
+R2_iterate <- list()  
+models_iterate <- list()  
+  
+
+  #randomly picked sets of controls for the modeling
+for(i in 1:it){
+  set.seed(i) 
+  HC1_model <- slice_sample(HC1, n= model_fraction) 
+  modelset <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC1_model$SampleID]
+  testset1  <-  rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC1$SampleID & !colnames(rpkm_log) %in% HC1_model$SampleID] 
+  testset2 <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC2$SampleID]
+  lasso_models <- lasso_model(modelset = modelset, GOI = subset, info =info) #these functions are defined in the chunk "multiple linear model all GOI functions"
+  R2 <- sapply(lasso_models, function(x) as.vector(x[["dev.ratio"]]))
+  test_HC1 <- lasso_test(testset = testset1, models  = lasso_models , GOI = subset, info =info )
+  test_HC2 <- lasso_test(testset = testset2, models = lasso_models , GOI = subset , info =info)
+  models_iterate[[i]] <- lasso_models 
+  res_std_HC1_iterate[[i]] = test_HC1 
+  res_std_HC2_iterate[[i]] =  test_HC2
+  R2_iterate[[i]] = R2 #save the R2 from all models from the iteration
+    #needs sanity check. Is the length of rownames(test_HC1) == rownames(test_HC2) == R2_iterate[[i]]. Stop if not "all genes are not modelled. check gene subset for duplicates".
+  # Modulus operation
+  if(i %% 10==0) {
+      # Print on the screen message
+      cat(paste0("iteration: ", i, "\n"))
+  }
+  
+  if(debug==TRUE & i == 10) {
+      cat("HC1 res \n")
+      print(matrix(test_HC1[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE)) 
+      print(colnames(test_HC1)[1:4])
+      print(rownames(test_HC1)[1:4])
+      cat("\nHC1 res has dimensions: \n")
+      print(dim(test_HC1))
+      cat("\nHC2 res \n")
+      print(matrix(test_HC2[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE))
+      print(colnames(test_HC2)[1:4])
+      print(rownames(test_HC2)[1:4])
+      cat("\nHC2 res has dimensions: \n")
+      print(dim(test_HC2))
+      cat("\nR2 \n")
+      cat(paste0(R2[1:4]), "\n")
+      print(names(R2)[1:4])
+      cat("number of R2:")
+      print(length(R2))
+  }
+}
+
+
+```
+
+
+
+```{r calculate SI from residuals HC vs HC}
+
+#import residuals and R2 if needed
+#res_std_HC1_iterate
+#res_std_HC2_iterate
+#R2_iterate 
+
+#weight residuals with R2
+res_w_HC1_iterate <- lapply(1:length(res_std_HC1_iterate), function(x) res_std_HC1_iterate[[x]]*R2_iterate[[x]] ) #weight residuals according to R2 from the models: multiplication by the vector (R2) is by default done column-wise, since genes are in rows.
+res_w_HC2_iterate <- lapply(1:length(res_std_HC2_iterate), function(x) res_std_HC2_iterate[[x]]*R2_iterate[[x]] )
+
+
+#melt function within list
+meltfun <- function(x,it) {
+   z <- reshape2::melt(x,id.vars=rownames(x))
+  colnames(z) <- c('gene_id', 'SampleID', 'res')
+  z$it = it
+   return(z)
+}
+
+
+res_w_HC1_all_long <- mapply(meltfun,res_w_HC1_iterate, it= seq(1:length(res_w_HC1_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_HC1_all<-  do.call("rbind", res_w_HC1_all_long) #combine all iterations into one dataframe
+
+res_w_HC2_all_long <- mapply(meltfun,res_w_HC2_iterate, it= seq(1:length(res_w_HC2_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_HC2_all<-  do.call("rbind", res_w_HC2_all_long) #combine all iterations into one dataframe
+
+#combine HC1 and HC2
+res_w_all <- rbind(res_w_HC1_all, res_w_HC2_all )
+
+#calculate mean weighted residual across iterations
+mean_res_w <- res_w_all %>%  
+  group_by(gene_id, SampleID) %>%  
+  summarise(mean_res_w= mean(res,  na.rm=TRUE)) %>% 
+  ungroup()
+
+
+
+
+#calculate SI
+SI <- mean_res_w %>% 
+  group_by(SampleID) %>% 
+  summarise(SI = sum(abs(mean_res_w))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup()
+  
+SI <- SI %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
+
+
+SI <- rename(SI, "diag" = PrimaryDiagnosis)
+
+
+
+```
+
+
+
+
+```{r compare C and BD HC vs HC}
+
+ options(digits = 5)
+SI_HC1 <- filter(SI, SampleID %in% HC1$SampleID) 
+SI_HC2 <- filter(SI,  SampleID %in% HC2$SampleID)
+ks.test( SI_HC2$SI,  SI_HC1$SI)
+kstest <- ks.test( SI_HC2$SI,  SI_HC1$SI)
+
+
+```
+
+
+```{r plot SI density HC vs HC }
+#dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/"
+dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/"
+
+SI <- SI %>% 
+  mutate(split_set = ifelse(SampleID %in% HC1$SampleID, 
+                            "HC1", "HC2")
+         )
+
+
+ #show the distribution of SI values as points
+SI_HCvsHC_boxplot <- 
+  SI %>% 
+ ggplot( aes(y=SI, x=split_set, colour= split_set))+ 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(size=0.2) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC1", "HC2")) +
+  labs(colour="split_set") + 
+  xlab("split_set")+ 
+  theme(legend.key.size = unit(0.5,"line"),
+        legend.position = ""
+        ) + 
+  scale_x_discrete(breaks=c(0,1),
+                    labels=c("HC1", "HC2")) +
+  ylab("SI score")
+
+SI_HCvsHC_wtest <- wilcox.test(SI ~ split_set, data = SI) 
+
+#is the variance equal?
+#SI_HCvsHC_levene_test_variance <-  
+ # leveneTest(SI ~ split_set, data = SI)
+
+#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/"
+
+#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/swap_HC_split/"
+
+#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BipSeq/06_lasso_model/RPKM/sACC/SI_after_iterations/SI_mean_wsr/HCvsHC/"
+
+
+write_tsv(SI, file = paste0(dir,"SI_wsr.txt"))
+write_tsv(mean_res_w, paste0(dir, "wsr.txt"))
+write.csv( unlist(SI_HCvsHC_wtest), file=paste0(dir, "SI_wtest.txt"))
+write.csv(as.data.frame(unlist(kstest)), file = paste0(dir,"SI_kstest.txt"))
+#write.csv(as.data.frame(unlist(SI_HCvsHC_levene_test_variance)), file = paste0(dir,"SI_levene_variance.txt"))
+ggsave(plot= SI_HCvsHC_boxplot, filename = paste0(dir, "SI_boxplot_HCvsHC.pdf"), width = 43, height = 43, units = "mm")
+
+
+```
+
+
+```{r sWSR analysis HCvsHC}
+wsr_HCvsHC <- mean_res_w %>% left_join(select(SI, SampleID, split_set), by ="SampleID")
+wsr_HCvsHC <- rename(wsr_HCvsHC, "wsr" = mean_res_w)
+
+
+#calculate mean and sd for the HC
+wsr_mean_HC1 <- wsr_HCvsHC %>% 
+  filter(split_set =="HC1") %>% 
+  group_by(gene_id) %>% 
+  mutate(mean_HC1 = mean(wsr),
+         sd_HC1 = sd(wsr)) %>% 
+  ungroup() %>% 
+  select(gene_id, mean_HC1, sd_HC1) %>% 
+  distinct()
+
+#calculate sWSR This is how many sd(HC) are the individual value from the mean HC1?
+#
+wsr_HCvsHC <- wsr_HCvsHC %>% 
+  left_join(wsr_mean_HC1, by="gene_id") %>% 
+  mutate(sWSR = (wsr- mean_HC1)/ sd_HC1)
+
+
+#calculate SI
+SI_sWSR <- wsr_HCvsHC %>%
+  filter(sd_HC1!= 0) %>% 
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup() %>% 
+  select(SampleID, split_set, SI) %>% 
+  distinct()
+
+
+#calculate ttest sWSR HCvsHC}
+SI_sWSR_wtest_HCvsHC <- wilcox.test(SI ~ split_set, data = SI_sWSR)
+
+
+
+write_tsv(SI_sWSR, file = paste0(dir,"SI_sWSR.txt"))
+write.csv( unlist(SI_sWSR_wtest_HCvsHC), file=paste0(dir, "SI_sWSR_ttest.txt"))
+```
+
+
+
+```{r plot wsr statistics HCvsHC}
+
+#import WSR data
+WSR_CMC_HBCC <- read_tsv( "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/wsr.txt")
+
+#WSR_CMC_HBCC <- wsr_HCvsHC
+
+WSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/wsr.txt")
+
+#WSR_BipSeq_sACC <- wsr_HCvsHC
+
+wsr_HCvsHC_all <- bind_rows("CMC-HBCC"= WSR_CMC_HBCC,
+                                "BipSeq-sACC"= WSR_BipSeq_sACC, 
+                            
+                                .id = "Set")
+
+wsr_HCvsHC_all <- wsr_HCvsHC_all %>%  rename("wsr"= mean_res_w)
+#import SI data
+SI_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/SI_wsr.txt")
+SI_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/SI_wsr.txt")
+
+
+SI_wsr_HCvsHC_all <- bind_rows("CMC-HBCC"= SI_CMC_HBCC,
+                                "BipSeq-sACC"= SI_BipSeq_sACC, 
+                                .id = "Set")
+
+wsr_HCvsHC_all <- wsr_HCvsHC_all %>% 
+  left_join(select(SI_wsr_HCvsHC_all, SampleID, SI, split_set), by= "SampleID")
+
+stat.test_all_HCvsHC <- wsr_HCvsHC_all %>% 
+  filter(wsr !=0) %>%  #wilcox test cannot handle zero values well
+  group_by(Set, gene_id) %>% 
+  wilcox_test(data= ., formula = wsr ~ split_set, ref.group  = "HC1" ) %>% 
+  #t_test(wsr ~ split_set, ref.group  = "HC1" ) %>% 
+  adjust_pvalue(method = "BH") %>% 
+  mutate(y.position = 0.07) %>% 
+  mutate(p.adj= round(p.adj, digits = 6))
+
+
+
+
+#p_thr <- 0.32 #threshold for colour in tile
+p_thr <- 0.15
+ 
+#for Wilcoxon test, we need to calculate the direction in median difference 
+wsr_median <- 
+  wsr_HCvsHC_all %>% 
+    group_by(gene_id, Set, split_set) %>% 
+    mutate(median= median(wsr)) %>% 
+    ungroup() %>% 
+  select(Set, gene_id, split_set, median) %>%  distinct() %>% 
+    group_by(gene_id, Set) %>% 
+  pivot_wider( names_from = split_set, values_from = median) %>% 
+    left_join(select(stat.test_all_HCvsHC, Set, gene_id, p, p.adj), by=c("Set", "gene_id")) %>% 
+  mutate(median_diff = HC2- HC1) %>% 
+  mutate(direction_diff = case_when(
+    median_diff > 0 & p < p_thr ~ "pos",
+    median_diff < 0 & p < p_thr ~ "neg",
+    TRUE ~ "no_diff"
+  )) %>%  
+  ungroup() %>%  distinct()
+
+
+#combine data
+stat.test_all_HCvsHC <-
+  stat.test_all_HCvsHC %>% 
+  left_join(select(wsr_median, gene_id, Set, median_diff, direction_diff), by= c("Set", "gene_id")) 
+
+stat.test_all_HCvsHC$gene_id <- factor(stat.test_all_HCvsHC$gene_id, levels=order.CMC_HBCC.gene_id)
+stat.test_all_HCvsHC$Set <- factor(stat.test_all_HCvsHC$Set, levels= c("CMC-HBCC", "BipSeq-sACC"))
+
+stat.test_all_HCvsHC <- stat.test_all_HCvsHC %>% mutate(sign = case_when(p.adj<= 0.05 ~ "FDR",
+                                                           p <= 0.05 & p.adj>= 0.05 ~ "p",
+                                                           TRUE ~ "none"))
+
+stat.test_all_HCvsHC <- stat.test_all_HCvsHC %>% drop_na() 
+
+#
+
+statistic <- 
+  ggplot(data=stat.test_all_HCvsHC, aes(x=Set, y=gene_id)) + 
+ # geom_tile(aes(fill=statistic)) + #for ttest
+   geom_tile(aes(fill=direction_diff)) +   #for wilcoxon
+         scale_fill_manual(values = c("pos" = "#F4A582", "neg" = "#92C5DE", "no_diff" = "#f7f7f7") #for wilcoxon
+                           ) + 
+#      scale_fill_stepsn(colours = c( "#F4A582", "#f7f7f7", "#92C5DE" ),     #for ttest
+  #                          breaks = c(-1, 1), limits=c(-5,5)) +
+     geom_point(aes(size=sign, alpha=sign)) +
+     scale_size_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+   scale_alpha_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+      theme(legend.title = element_blank())+
+    labs(title = "" ) +
+  theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(size = 5, vjust=1, angle= 45, hjust = 0.9),
+          axis.text.y = element_text(size = 5, hjust=1),
+          axis.ticks = element_blank(),
+          legend.position = "none",
+          axis.line = element_line(color='black', size = 0.2),
+          panel.border = element_rect(colour = "black", fill=NA, size=0.2)
+          ) + 
+ # scale_x_discrete(position="top") +
+    ylab("") +
+  xlab("")+
+     geom_hline(yintercept=seq(1.5, length(unique(stat.test_all_HCvsHC$gene_id))+1, 1), 
+             lwd=0.1, colour="gray")# Horizonal lines
+
+
+ggsave(statistic, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/statistic_all_sets_HCvsHC.pdf", width=3.32, height= 11.75, units="cm")
+
+
+plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
+
+p <- wsr_HCvsHC_all %>% 
+filter( gene_id %in% plot_genes) %>%
+ggplot(aes(x = split_set, y = wsr, color = split_set)) +
+  theme_bw() +
+  geom_boxplot(outlier.shape = NA, colour="black") +
+  geom_jitter(size=0.1,width = 0.2)  +
+#facet_wrap(~ factor(gene_id, levels=genes_R2$gene_id), nrow  = 1) +
+  facet_grid(factor(gene_id, levels= plot_genes) ~ factor(Set, levels = c("CMC-HBCC",  "BipSeq-sACC",  "BipSeq-Amg"))) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC1", "HC2")) +
+#  scale_x_discrete(breaks=c(0,1), labels=c("HC1", "HC2")) +
+  theme(text = element_text(size=5),
+        legend.position="none",
+        axis.ticks = element_blank(),
+        strip.background.y  = element_rect(fill  = "white"),
+         strip.background.x  = element_rect(fill  = "white"))  + ylab("") +
+  coord_cartesian(ylim = c(-0.15, 0.15)) 
+
+ggsave(plot=p, path = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/", filename = "compare_wsr_HCvsHC.pdf", width = 5.4, height = 10.48, units = "cm")
+
+```
+
+
+
+negative control base model on BD as modelset
+
+```{r prepare dataset BD model}
+
+
+dataset <- "BipSeq-sACC"
+dataset <- "CMC-HBCC"
+dataset <- "GVEX-SMRI"
+
+info <- info_all %>%  filter(Set== dataset) 
+#rpkm_log <- rpkm_log_all[,colnames(rpkm_log_all) %in% info$SampleID]
+#rpkm_log <- rpkm_log_GVEX_SMRI
+
+  
+rpkm_log <- rpkm_log_CMC_HBCC 
+
+
+# rpkm_log <- rpkm_log_BipSeq_sACC
+rpkm_log <- rpkm_log_GVEX_SMRI
+
+subset <- subset[subset %in% rownames(rpkm_log)]
+
+HC <- info %>% filter(PrimaryDiagnosis=="HC") %>% select(SampleID)
+BD <-  info %>% filter(PrimaryDiagnosis=="BD") %>% select(SampleID)
+
+setequal(info$SampleID, colnames(rpkm_log))
+
+
+#Which variables (covarites) should be fixed?
+#for CMC, GVEX where ethnicity differs 
+   p.fac = rep(1, length(subset) -1 + 5) 
+    p.fac[1:5] = 0
+
+
+#for BipSeq where ethnicity does not differ
+    p.fac = rep(1, length(subset) -1 + 4) 
+    p.fac[1:4] = 0
+```
+
+
+
+```{r model with BD}
+
+
+debug = TRUE
+
+subset <- subset[subset %in% rownames(rpkm_log)]
+subset <- unique(subset) 
+
+it <- 100 #number of iterations  
+#model_fraction <- length(BD$SampleID) *2/3 #for BipSeq sACC
+model_fraction <- length(BD$SampleID) *0.9 #for CMC-HBCC, GVEX-SMRI
+
+#save the results from iterations to list
+res_std_HC_iterate <- list()
+res_std_BD_iterate<- list()
+R2_iterate <- list()  
+models_iterate <- list()  
+  
+
+  #randomly picked sets of controls for the modeling
+for(i in 1:it){
+  set.seed(i) 
+  BD_model <- slice_sample(BD, n= model_fraction) 
+  modelset <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% BD_model$SampleID]
+  testset1 <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% BD$SampleID & !colnames(rpkm_log) %in% BD_model$SampleID]
+  testset2 <- rpkm_log[rownames(rpkm_log) %in% subset,colnames(rpkm_log) %in% HC$SampleID]
+  lasso_models <- lasso_model(modelset = modelset, GOI = subset, info =info) #these functions are defined in the chunk "multiple linear model all GOI functions"
+  R2 <- sapply(lasso_models, function(x) as.vector(x[["dev.ratio"]]))
+  test_BD <- lasso_test(testset = testset1, models  = lasso_models , GOI = subset, info =info )
+  test_HC <- lasso_test(testset = testset2, models = lasso_models , GOI = subset , info =info)
+  models_iterate[[i]] <- lasso_models 
+  res_std_BD_iterate[[i]] = test_BD 
+  res_std_HC_iterate[[i]] =  test_HC
+  R2_iterate[[i]] = R2 #save the R2 from all models from the iteration
+
+  # Modulus operation
+  if(i %% 10==0) {
+      # Print on the screen some message
+      cat(paste0("iteration: ", i, "\n"))
+  }
+  
+  if(debug==TRUE & i == 10) {
+      cat("BD res \n")
+      print(matrix(test_BD[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE)) 
+      print(colnames(test_BD)[1:4])
+      print(rownames(test_BD)[1:4])
+      cat("\nBD res has dimensions: \n")
+      print(dim(test_BD))
+      cat("\nHC res \n")
+      print(matrix(test_HC[1:4,1:4], nrow= 4, ncol=4, byrow = FALSE))
+      print(colnames(test_HC)[1:4])
+      print(rownames(test_HC)[1:4])
+      cat("\nHC res has dimensions: \n")
+      print(dim(test_HC))
+      cat("\nR2 \n")
+      cat(paste0(R2[1:4]), "\n")
+      print(names(R2)[1:4])
+      cat("number of R2:")
+      print(length(R2))
+  }
+}
+
+#weight residuals with R2
+res_w_HC_iterate <- lapply(1:length(res_std_HC_iterate), function(x) res_std_HC_iterate[[x]]*R2_iterate[[x]] ) #weight residuals according to R2 from the models: multiplication by the vector (R2) is by default done column-wise, since genes are in rows.
+res_w_BD_iterate <- lapply(1:length(res_std_BD_iterate), function(x) res_std_BD_iterate[[x]]*R2_iterate[[x]] )
+
+
+#melt function within list
+meltfun <- function(x,it) {
+   z <- reshape2::melt(x,id.vars=rownames(x))
+  colnames(z) <- c('gene_id', 'SampleID', 'res')
+  z$it = it
+   return(z)
+}
+
+
+res_w_HC_all_long <- mapply(meltfun,res_w_HC_iterate, it= seq(1:length(res_w_HC_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_HC_all<-  do.call("rbind", res_w_HC_all_long) #combine all iterations into one dataframe
+
+res_w_BD_all_long <- mapply(meltfun,res_w_BD_iterate, it= seq(1:length(res_w_BD_iterate)),SIMPLIFY=FALSE) #melt each iteration to long
+res_w_BD_all<-  do.call("rbind", res_w_BD_all_long) #combine all iterations into one dataframe
+
+#combine C and BD
+res_w_all <- rbind(res_w_HC_all, res_w_BD_all )
+
+#calculate mean weighted residual across iterations
+mean_res_w <- res_w_all %>%  
+  group_by(gene_id, SampleID) %>%  
+  summarise(mean_res_w= mean(res,  na.rm=TRUE)) %>% 
+  ungroup()
+
+
+
+
+#calculate SI
+SI <- mean_res_w %>% 
+  group_by(SampleID) %>% 
+  summarise(SI = sqrt(sum(mean_res_w^2)/n_distinct(gene_id))) %>% 
+  ungroup()
+  
+SI <- SI %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
+
+
+SI <- rename(SI, "diag" = PrimaryDiagnosis)
+
+
+
+#save the residuals and SI-scores
+write_tsv(SI, file = paste0(dir,"SI_C_BD_lasso_", it ,"it.txt"))
+write_tsv(res_w_HC_all, file = paste0(dir,"C_results_residuals_gene_ind_lasso_", it ,"it.txt"))
+write_tsv(res_w_BD_all, file = paste0(dir, "BD_results_residuals_gene_ind_lasso_", it ,"it.txt"))
+
+write_tsv(res_w_all, file= paste0(dir, "residuals_w_all_", it,"it.txt"))
+write_tsv(mean_res_w, file= paste0(dir, "residuals_w_mean_", it,"it.txt"))
+write_tsv(R2_all_long, file= paste0(dir, "R2_", it,"it.txt"))
+
+
+
+```
+
+```{r import control experiment model with cases}
+
+SI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BD_model/CMC-HBCC/SI_C_BD_wsr.txt")
+
+```
+
+̛
+```{r compare C and BD BD model}
+SI_C_BD <- SI
+
+ options(digits = 5)
+SI_HC <- filter(SI_C_BD, diag=="HC") 
+SI_BD <- filter(SI_C_BD,  diag=="BD")
+ks.test( SI_BD$SI,  SI_HC$SI)
+kstest <- ks.test( SI_BD$SI,  SI_HC$SI)
+
+
+```
+
+
+```{r logistic regression BD model}
+
+info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "Caucasian", replacement = "CAUC") 
+info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "Hispanic", replacement = "HiSP")
+info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "AS", replacement = "Asian")
+
+info_all$Ethnicity <- factor(info_all$Ethnicity, levels = c("CAUC",             "HiSP" ,            "Asian" ,     "African-American" ,       "Unknown"          ))
+
+
+#SI$diag <- str_replace(SI$diag, pattern = "HC", replacement = "0")
+#SI$diag <- str_replace(SI$diag, pattern = "BD", replacement = "1")
+SI$diag <- as.factor(SI$diag)
+
+
+SI <-  cbind(Ethnicity = info_all$Ethnicity[match(SI$SampleID, info_all$SampleID)], SI)
+#SI <-  cbind(Sex = info_all$ReportedGender[match(SI$SampleID, info_all$SampleID)], SI)
+#SI <-  cbind(Age = info_all$Age[match(SI$SampleID, info_all$SampleID)], SI)
+#SI <-  cbind(Study = info_all$Study[match(SI$SampleID, info_all$SampleID)], SI) #For BrainGVEX
+
+
+SI_matrix <- model.matrix(~ Ethnicity, -1, data = as.data.frame(SI) )
+SI_dummy <- data.frame(SI[ , ! colnames(SI) %in% "Ethnicity"],       # Create dummy data
+                         model.matrix( ~ Ethnicity - 1, as.data.frame(SI)))
+
+
+SI_glm <- glm(diag ~ SI, data= as.data.frame(SI), family = "binomial")
+SI_glm_cov <- glm(diag ~ SI + Ethnicity + Sex + Age,
+       #         +Study, #For BrainGVEX
+                  data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
+
+summary <- summary(SI_glm)
+summary_cov <- summary(SI_glm_cov)
+perf <- model_performance(SI_glm)
+
+#show the distribution of SI values as points
+SI_boxplot <- SI %>% 
+  rename(Diagnosis = diag) %>% 
+ ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(size=0.2) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  labs(colour="Diagnosis") + 
+  xlab("Diagnosis")+ 
+  theme(legend.key.size = unit(0.5,"line"),
+        legend.position = ""
+        ) + 
+  scale_x_discrete(breaks=c(0,1),
+                    labels=c("HC", "BD")) +
+  ylab("SI score")
+
+SI_ttest <- t.test(SI ~ diag, data = SI)
+SI_wilcox <- wilcox.test(SI ~ diag, data = SI)
+
+#get pseudo R2 from the model
+pseudoR2 <- nagelkerke(SI_glm)
+
+
+ r2l <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+```
+
+```{r save analysis BD model }
+write_tsv(SI, file = paste0(dir,"SI_C_BD_wsr.txt"))
+write.csv(summary$coefficients, file=paste0(dir, "glm_summary.txt"))
+write.csv(summary_cov$coefficients, file=paste0(dir, "glm_covariates_summary.txt"))
+write.csv(perf, file=paste0(dir, "glm_perf.txt"))
+write.csv(pseudoR2$Pseudo.R.squared.for.model.vs.null, file=paste0(dir, "glm_pseudoR2.txt"))
+write.csv( unlist(SI_ttest), file=paste0(dir, "SI_ttest.txt"))
+write.csv( unlist(SI_wilcox), file=paste0(dir, "SI_wilcox.txt"))
+write.csv(r2l, file=paste0(dir, "nagelkerke_liab.txt"))
+write.csv(as.data.frame(unlist(kstest)), file = paste0(dir,"SI_kstest.txt"))
+ggsave(plot= SI_boxplot, filename = paste0(dir, "SI_boxplot.pdf"), width = 43, height = 43, units = "mm")
+```
+
+
+Inspect the regression by ROC curves 
+```{r AUC of the regression BD model}
+#ROC (Receiver operating characteristic) curve
+pROC_obj <- roc(SI$diag,SI$SI,
+                direction= "<", #when cases have lower SI, we need to force the direction
+            smoothed = TRUE,
+            # arguments for ci
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+sens.ci <- ci.se(pROC_obj)
+
+
+sens_ci_fix <- as_tibble(sens.ci, rownames = "spec")
+sens_ci_fix$spec <- as.numeric(sens_ci_fix$spec)
+
+pROC <- 
+  ggroc(pROC_obj, size=0.5) + 
+  geom_abline(slope=1, intercept = 1, linetype = "dashed", alpha=0.7, color = "black") +
+  geom_ribbon(data = sens_ci_fix, 
+              aes(x = spec, ymin = `2.5%`, ymax = `97.5%`), 
+              fill = "#053061", alpha= 0.2) +
+  xlab("Specificity") + ylab("Sensitivity")
+
+write.csv(pROC_obj$auc, file=paste0(dir, "auc_SI_WSR.txt"))
+ggsave(pROC, filename = paste0(dir, "ROC_WSR.pdf"), width = 43, height = 43, units = "mm")  
+```
+
+Calculations based on sWSR (i.e. difference from HC mean)
+```{r calculate sWSR BD model}
+
+#change directory
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/sWSR/")
+#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/sWSR/")
+
+#get diagnosis back in
+mean_res_w_info <- mean_res_w %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
+mean_res_w_info <- mean_res_w_info %>%  rename("wsr"= mean_res_w)
+
+#calculate mean and sd for the HC
+wsr_mean_HC <- mean_res_w_info %>% 
+  filter(PrimaryDiagnosis =="HC") %>% 
+  group_by(gene_id) %>% 
+  mutate(mean_HC = mean(wsr),
+         sd_HC = sd(wsr)) %>% 
+  ungroup() %>% 
+  select(gene_id, mean_HC, sd_HC) %>% 
+  distinct()
+
+#calculate sWSR-value. This is at first how many sd(HC) are the individual value from the mean HC?
+
+sWSR_Set <- mean_res_w_info %>% 
+  left_join(wsr_mean_HC, by="gene_id") %>% 
+  mutate(sWSR = (wsr- mean_HC)/ sd_HC)
+
+```
+
+
+```{r SI score sWSR BD model}
+#calculate SI
+SI_sWSR <- sWSR_Set %>% 
+ drop_na() %>%  #when all models have R2=0 for a gene, then res will be 0 and SI NA
+  group_by(SampleID) %>% 
+  mutate(SI = sum(abs(sWSR))/n_distinct(gene_id)) %>% #use the mean weighted scaled residual value 
+  ungroup() %>% 
+  select(SampleID, PrimaryDiagnosis, SI) %>%
+  distinct()
+
+SI_sWSR<- rename(SI_sWSR, "diag" = PrimaryDiagnosis)
+SI_sWSR$diag <- factor(SI_sWSR$diag, levels = c("HC", "BD"))
+
+SI_sWSR_boxplot <- 
+  SI_sWSR %>% 
+  rename(Diagnosis = diag) %>% 
+ ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
+  geom_boxplot(outlier.shape = NA) + 
+  geom_jitter(size=0.2) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  labs(colour="Diagnosis") + 
+  xlab("Diagnosis")+ 
+  theme(legend.key.size = unit(0.5,"line"),
+        legend.position = ""
+        ) + 
+  scale_x_discrete(labels=c("HC", "BD")) +
+     scale_y_continuous(
+       labels = label_number(accuracy = 0.1)
+       ) +
+  ylab("SI score")
+
+SI_sWSR_dens <- 
+  SI_sWSR %>% 
+  ggplot(aes(x=SI, colour=diag)) + 
+  geom_density(size=1) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  #theme(legend.position = "none") +
+  labs(x= "SI score", y= "Density")
+
+ggsave(plot= SI_sWSR_boxplot, filename = paste0(dir, "SI_sWSR_boxplot.pdf"), width = 43, height = 43, units = "mm")
+ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43, height = 43, units = "mm")
+
+```
+
+```{r calculate ttest nagelkerke and auc BD model}
+
+SI_sWSR_ttest <- t.test(SI ~ diag, data = SI_sWSR)
+SI_sWSR_wilcox <- wilcox.test(SI ~ diag, data = SI_sWSR)
+
+SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "HC", replacement = "0")
+SI_sWSR$diag <- str_replace(SI_sWSR$diag, pattern = "BD", replacement = "1")
+SI_sWSR$diag <- as.factor(SI_sWSR$diag)
+
+SI_sWSR<-  cbind(Ethnicity_code = info$Ethnicity_code[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+SI_sWSR<-  cbind(Sex = info$ReportedGender[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+SI_sWSR<-  cbind(Age = info$Age[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR)
+#SI_sWSR<-  cbind(Study = info$Study[match(SI_sWSR$SampleID, info$SampleID)], SI_sWSR) #For CMC-Pitt
+
+
+SI_sWSR_glm <- glm(diag ~ SI, data= as.data.frame(SI_sWSR), family = "binomial")
+SI_sWSR_glm_cov <- glm(diag ~ SI + Sex + Age+ Ethnicity_code,
+       #         +Study  , #For BrainGVEX
+                  data= as.data.frame(SI_sWSR), family = "binomial") #check to see which variables effect outcome
+
+summary_sWSR<- summary(SI_sWSR_glm)
+summary_cov_sWSR<- summary(SI_sWSR_glm_cov)
+perf_sWSR<- model_performance(SI_sWSR_glm)
+
+
+#get pseudo R2 from the model
+pseudoR2_sWSR<- nagelkerke(SI_sWSR_glm)
+r2l_sWSR <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2_sWSR$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
+                   ) 
+
+pROC_obj <- roc(SI_sWSR$diag,SI_sWSR$SI,
+                direction= "<", #when cases have lower SI, we need to force the direction
+            smoothed = TRUE,
+            # arguments for ci
+            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
+            # arguments for plot
+            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
+            print.auc=TRUE, show.thres=TRUE)
+
+
+auc_sWSR <- pROC_obj$auc
+
+```
+
+```{r save sWSR results BD model}
+write_tsv(sWSR_Set, paste0(dir, "sWSR.txt"))
+write_tsv(SI_sWSR, file= paste0(dir, "SI_sWSR.txt"))
+write.csv( unlist(SI_sWSR_ttest), file= paste0(dir,"SI_sWSR_ttest.txt"))
+write.csv( unlist(SI_sWSR_wilcox), file= paste0(dir,"SI_sWSR_wilcox.txt"))
+write.csv(r2l_sWSR,  file= paste0(dir,"r2l_sWSR.txt"))
+write.csv(auc_sWSR[1], file=paste0(dir, "auc_sWSR.txt"))
+ggsave(pROC, filename = paste0(dir, "ROC_sWSR.pdf"), width = 43, height = 43, units = "mm")  
+ggsave(plot= SI_sWSR_boxplot, filename = paste0(dir, "SI_sWSR_boxplot.pdf"), width = 43, height = 43, units = "mm")
+ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43, height = 43, units = "mm")
+
+
+```
+
+
+
+```{r tstats wsr BD model}
+
+dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BD_model/"
+
+
+sWSR_model_BD_CMC_HBCC <- read_tsv( paste0(dir,  "CMC-HBCC/", "sWSR/sWSR.txt"))
+sWSR_model_BD_GVEX_SMRI <- read_tsv( paste0(dir,  "GVEX-SMRI/", "sWSR/sWSR.txt"))
+sWSR_model_BD_BipSeq_sACC<- read_tsv( paste0(dir,  "BipSeq-sACC/", "sWSR/sWSR.txt"))
+
+sWSR_all_model_BD <- bind_rows(
+  "CMC-HBCC" = sWSR_model_BD_CMC_HBCC, 
+  "GVEX-SMRI" = sWSR_model_BD_GVEX_SMRI, 
+  "BipSeq-sACC" = sWSR_model_BD_BipSeq_sACC, 
+  .id = "Set" )
+
+wsr_all_model_BD <- sWSR_all_model_BD %>%  select(Set, SampleID, PrimaryDiagnosis, gene_id, wsr)
+
+wsr_all_model_BD$PrimaryDiagnosis <- factor(wsr_all_model_BD$PrimaryDiagnosis, levels = c("HC", "BD"))
+
+#with non-parametric statistics
+  stat.test_all<-
+  wsr_all_model_BD %>% 
+  #filter(wsr !=0) %>%  #wilcox test cannot handle many zero values well
+  group_by(Set, gene_id) %>% 
+  wilcox_test(data= ., formula = wsr ~ PrimaryDiagnosis, ref.group  = "HC" ) %>% 
+  adjust_pvalue(method = "BH") %>% 
+  mutate(y.position = 0.07) %>% 
+  mutate(p.adj= round(p.adj, digits = 6))
+
+
+#for Wilcoxon test, we need to calculate the direction in median difference 
+#p_thr <- 0.32 #threshold for colour in tile
+p_thr <- 0.15
+ 
+wsr_median <- 
+  wsr_all_model_BD %>% 
+    group_by(gene_id, Set, PrimaryDiagnosis) %>% 
+    mutate(median= median(wsr)) %>% 
+    ungroup() %>% 
+  select(Set, gene_id, PrimaryDiagnosis, median) %>%  distinct() %>%
+    group_by(gene_id, Set) %>% 
+  pivot_wider( names_from = PrimaryDiagnosis, values_from = median) %>% 
+  mutate(median_diff = BD- HC) %>% 
+  left_join(select(stat.test_all, Set, gene_id, p, p.adj), by=c("Set", "gene_id")) %>% 
+  mutate(direction_diff = case_when(
+    median_diff > 0 & p < p_thr ~ "pos",
+    median_diff < 0 & p < p_thr ~ "neg",
+    TRUE ~ "no_diff"
+  )) %>%  
+  ungroup() %>%  distinct()
+
+
+#combine data
+stat.test_all <-
+  stat.test_all %>% 
+  left_join(select(wsr_median, gene_id, Set, median_diff, direction_diff), by= c("Set", "gene_id")) 
+
+stat.test_all <- stat.test_all %>% drop_na() 
+
+
+stat.test_all$Set <- factor(stat.test_all$Set, levels= c("CMC-HBCC","GVEX-SMRI", "BipSeq-sACC"))
+
+stat.test_all <- stat.test_all %>% mutate(sign = case_when(p.adj<= 0.05 ~ "FDR",
+                                                           p <= 0.05 & p.adj>= 0.05 ~ "p",
+                                                           TRUE ~ "none"))
+
+
+stat.test_all$gene_id <- factor(stat.test_all$gene_id, levels=order.CMC_HBCC.gene_id)
+stat.test_all <- stat.test_all %>% drop_na() 
+statistic <- 
+  ggplot(data=stat.test_all, aes(x=Set, y=gene_id)) + 
+   geom_tile(aes(fill=direction_diff)) +   
+         scale_fill_manual(values = c("pos" = "#F4A582", "neg" = "#92C5DE", "no_diff" = "#f7f7f7") #for wilcoxon 
+                           ) +
+     geom_point(data=stat.test_all, aes(size=sign, alpha=sign)) +
+     scale_size_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+   scale_alpha_manual(values=c("FDR"=0.5, "p"=0.2, "none"= NA), guide="none") +
+      theme(legend.title = element_blank())+
+    labs(title = "" ) +
+  theme_classic() +
+    theme(plot.title = element_text(hjust = 0.5),
+          axis.text.x = element_text(size = 5, vjust=1, angle= 45, hjust = 0.9),
+          axis.text.y = element_text(size = 5, hjust=1),
+          axis.ticks = element_blank(),
+          legend.position = "none",
+          axis.line = element_line(color='black', size = 0.2),
+          panel.border = element_rect(colour = "black", fill=NA, size=0.2)
+          ) + 
+    #scale_y_discrete(labels= order.CMC_HBCC.gene_id) +
+ # scale_x_discrete(position="top") +
+    ylab("") +
+  xlab("")+
+     geom_hline(yintercept=seq(1.5, length(unique(stat.test_all$gene_id))+1, 1), 
+             lwd=0.1, colour="gray")# Horizonal lines
+
+  
+  ggsave(statistic, filename = paste0(dir, "statistic_all_sets_model_BD.pdf"), width=4.15, height= 11.75, units="cm")
+  
+  plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
+  
+ p <- 
+    wsr_all_model_BD %>%
+filter( gene_id %in% plot_genes) %>%
+ggplot(aes(x = PrimaryDiagnosis, y = wsr, color = PrimaryDiagnosis)) +
+  theme_bw() +
+  geom_boxplot(outlier.shape = NA, colour="black") +
+  geom_jitter(size=0.1,width = 0.2)  +
+#facet_wrap(~ factor(gene_id, levels=genes_R2$gene_id), nrow  = 1) +
+  facet_grid(rows = vars(factor(gene_id, levels= plot_genes)), cols= vars(factor(Set, levels = c("CMC-HBCC", "GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg")))) +
+  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
+  scale_x_discrete(breaks=c(0,1), labels=c("HC", "BD")) +
+  theme(text = element_text(size=5),
+        legend.position="none",
+        axis.ticks = element_blank(),
+        strip.background.y  = element_rect(fill  = "#F4A582"),
+         strip.background.x  = element_rect(fill  = "white")) + 
+    xlab("") + ylab("") +
+  coord_cartesian(ylim = c(-0.15, 0.15)) 
+
+p_blue <- p + theme(strip.background.y = element_rect(fill  = "#92C5DE")) + coord_cartesian(ylim = c(-0.25, 0.25)) 
+p_white <- p + theme(strip.background.y = element_rect(fill  = "white")) + coord_cartesian(ylim = c(-0.18, 0.15)) 
+
+ ggsave(plot=p, path = dir, filename = "compare_res_BD_HC_redstrip_BD_model.pdf", width = 7.2, height = 10.48, units = "cm")
+  ggsave(plot=p_blue, path =dir, filename = "compare_res_BD_HC_bluestrip_BD_model.pdf", width = 7.2, height = 10.48, units = "cm")
+  ggsave(plot=p_white, path = dir, filename = "compare_res_BD_HC_whitestrip_BD_model.pdf", width = 7.2, height = 10.48, units = "cm")
+ 
+```
+
