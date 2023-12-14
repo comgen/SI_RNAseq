@@ -5,7 +5,12 @@ date: "3/9/2023"
 output: html_document
 ---
 
+
+Setup themes for figures and import background functions
 ```{r setup, include=FALSE}
+
+
+
 knitr::opts_chunk$set(message = FALSE)
 library(tidyverse)
 library(readxl)
@@ -26,18 +31,15 @@ library(scales)
 theme_set(theme_bw()) #change default ggplot background
 theme_update(text= element_text(size = 7, family = "sans"))
 #import self-made functions
-source("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/07_common_scripts/functions.R")
+source("~/RNAseq_temporal/analysis/OFC/07_common_scripts/functions.R")
 cols <- scales::viridis_pal()(3)[c(3,2)] #yellow and green
-high_L2G <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/genes_l2g_0.5_locus.txt")
-high_L2G_closest <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/loci_missing_nearest.txt")
+high_L2G <- read_tsv("~/RNAseq_temporal/genes_of_interest/OpenTargets/genes_l2g_0.5_locus.txt") #this corresponds to table S1
+high_L2G_closest <- read_tsv("~/RNAseq_temporal/genes_of_interest/OpenTargets/loci_missing_nearest.txt") #this corresponds to table S3
 high_L2G_closest <- high_L2G_closest %>% rename("symbol"= Nearest_gene) %>%
 bind_rows( select(high_L2G, symbol, Locus)) %>%  distinct()
 subset <- high_L2G_closest$symbol
 subset <- unique(subset)
 subsetname <- "high_L2G_closest"
-#genes_res_diff <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/core_genes_consistent_res_diff.txt", col_names = FALSE)
-#subset <- genes_res_diff$X1
-#subsetname <- "genes_res_diff_22"
 
 #the liability scale takes into account the discrepancy bewtween number of cases in the test set and in the population
 #k <- 0.02 #according to Kevin O'Connell, this prevalence is what was used in the BD GWAS PGC3
@@ -57,17 +59,12 @@ h2l <- cc * e * r2n / (1 + cc * e * theta * r2n)
 ```
 
 
-```{r change subset, eval=FALSE}
 
-PGC3_PIP_070 <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/paper/revision/gene_pip070_PGC3.txt", col_names = FALSE) 
-
-subset <- PGC3_PIP_070$X1
-subsetname <- "PGC3_PIP_070"
-```
-
+##CORE##
+Start with gene count data from PsychEncode. Normalise with edgeR and produce log2 RPKM, working on each of the 4 datasets separately.
 
 ```{r edgeR normalisation}
-dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+dir <- "~/RNAseq_DE/"
 
 Set <- "CMC-HBCC"
 counts <- count_CM
@@ -251,23 +248,25 @@ rpkm_log_BipSeq_sACC <- rpkm_Set
 ```
 
 
+When data has been normalised and saved, it can be imported here.
 ```{r import expression data}
-data_dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+data_dir <- "~/RNAseq_DE/"
 
 rpkm_log_CMC_HBCC <- read_tsv(paste0(data_dir, "CMC-HBCC_rpkm_log.txt"))
 rpkm_log_CMC_HBCC <- column_to_rownames(rpkm_log_CMC_HBCC, var="gene_id")
 
-rpkm_log_CMC_Pitt <-  read_tsv("/Users/asbjorh/PhD/RNAseq_DE/CMC-Pitt_rpkm_log.txt")
-rpkm_log_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_DE/BipSeq-sACC_rpkm_log.txt")
-rpkm_log_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_DE/GVEX-SMRI_rpkm_log.txt")
+rpkm_log_CMC_Pitt <-  read_tsv("~/RNAseq_DE/CMC-Pitt_rpkm_log.txt")
+rpkm_log_BipSeq_sACC <- read_tsv("~/RNAseq_DE/BipSeq-sACC_rpkm_log.txt")
+rpkm_log_GVEX_SMRI <- read_tsv("~/RNAseq_DE/GVEX-SMRI_rpkm_log.txt")
 
-info_all <-  read_tsv("/Users/asbjorh/PhD/RNAseq_DE/info_all.txt")
+info_all <-  read_tsv("~/RNAseq_DE/info_all.txt")
 
 remove_PCA <- "" #already removed from the stored data
 ```
 
 
-
+##CORE##
+Define the functions to be used when modelling gene expression based on other genes of interest. Then, a function will calculate the residual for each modelled gene in each individual.
 ```{r glmnet lasso model functions}
 #######function to build models #########
 lasso_model <- function(modelset, GOI, info){
@@ -373,6 +372,8 @@ lasso_residuals_std
 
 ```
 
+
+Define the gene set to study.
 ```{r gene subset}
 # Get one gene per GWAS locus
 subset <- high_L2G_closest$symbol
@@ -382,10 +383,11 @@ subset <- unique(subset) # because 2 loci share a gene.
 length(subset)
 ```
 
-
-Prepare the expression and covariate data
-```{r}
+##CORE##
+Prepare the expression and covariate data. Iterate through each dataset separately, some adjustments need to be done when it comes to available covariates and optimum sample set splits (train/test), as case/control ratio varies between the sets.
+```{r define data and samplesets}
 info_all <- info_all %>%  filter(!SampleID %in% remove_PCA)
+
 
 dataset <- "CMC-HBCC"
 dataset <- "CMC-Pitt"
@@ -413,11 +415,11 @@ setequal(info$SampleID, colnames(rpkm_log))
 ```
 
 
-
-Model and calculate residuals
+##CORE##
+Model and calculate residuals. Change the number of iterations and optimum sample set splits for each set.
 
 ```{r run iterations of lasso test}
-debug = TRUE
+debug = TRUE #switches on sanity checs and iteration count during analysis.
 
 it <- 100 #number of iterations  
 #it <- 300 #for BrainGVEX_SMRI
@@ -437,8 +439,6 @@ R2_iterate <- list()
 models_iterate <- list()  
 #beta_iterate <- list()
 #function to save named beta
-#?
-
 
 #Which variables (covarites) should be fixed?
 #for CMC, GVEX where ethnicity differs 
@@ -467,7 +467,9 @@ for(i in 1:it){
   R2_iterate[[i]] = R2 #save the R2 from all models from the iteration
   
     #needs sanity check. Is the length of rownames(test_C) == rownames(test_BD) == R2_iterate[[i]]. Stop if not "all genes are not modelled. check gene subset for duplicates".
-  # Modulus operation
+  
+  # Modulus operation. Counts iterations as the analysis is underway. Will give some example figures for manual sanity check while waiting.
+  
   if(i %% 10==0) {
       cat(paste0("iteration: ", i, "\n"))
   }
@@ -502,8 +504,8 @@ for(i in 1:it){
 ```
 
 
-
-
+##CORE##
+Here is where the residuals is converted to weighted, scaled residuals. The residuals are weighted with their model's fit (*R2), and scaled to mean observed expression value in the dataset. 
 ```{r calculate WSR from residuals}
 
 #weight residuals with R2
@@ -540,20 +542,14 @@ mean_res_w <- res_w_all %>%
 
 ̛
 ```{r change save dir}
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
+dir <- paste0("~/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
 ```
 
+##GRAPH##
+Save each model's R2, and produce the plots for figure S2.
 ```{r save R2}
 #change directory
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/WSR/")
-
+dir <- paste0("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/WSR/")
 
 
 models_info <- as.data.frame(do.call(cbind, R2_iterate)) #create a dataframe, each iteration in columns. 
@@ -574,26 +570,15 @@ R2_models <- models_info %>%
   ylab("R2 in 100 iterations")
 
   ggsave(plot = R2_models, path = dir, filename = "R2_models.pdf", height = 12, width= 30, units="cm")
-  
-  
-  
-  
-   #You can calculate R2 for the test data yourself, by extracting the deviance and null deviance and calculating dev.ratio=1-dev/nulldev.
+
 ```
 
-Calculations based on WSR 
+##ADDITIONAL##
+Calculations based on WSR. This produces the analysis of WSR before they are standardised into sWSR (see below).
 
-
-```{r calculate SI score}
+```{r calculate SI score WSR}
 #change directory
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/WSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/WSR/")
+#dir <- paste0("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/WSR/")
 
 #calculate SI
 SI <- mean_res_w %>% 
@@ -603,13 +588,13 @@ SI <- mean_res_w %>%
   
 SI <- SI %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
 
-
 SI <- rename(SI, "diag" = PrimaryDiagnosis)
 
 ```
 
-
-```{r compare C and BD }
+##ADDITIONAL##
+Calculations based on WSR. 
+```{r compare C and BD WSR}
 SI_C_BD <- SI
 
  options(digits = 5)
@@ -622,6 +607,8 @@ kstest <- ks.test( SI_BD$SI,  SI_HC$SI)
 ```
 
 
+##ADDITIONAL##
+Calculations based on WSR.
 ```{r logistic regression}
 
 SI$diag <- str_replace(SI$diag, pattern = "HC", replacement = "0")
@@ -685,6 +672,9 @@ pseudoR2 <- nagelkerke(SI_glm)
                    ) 
 ```
 
+
+##ADDITIONAL##
+Calculations based on WSR.
 ```{r save analysis }
 write_tsv(SI, file = paste0(dir,"SI_C_BD_wsr.txt"))
 write.csv(summary$coefficients, file=paste0(dir, "glm_summary.txt"))
@@ -698,7 +688,8 @@ write.csv(as.data.frame(unlist(kstest)), file = paste0(dir,"SI_kstest.txt"))
 ggsave(plot= SI_boxplot, filename = paste0(dir, "SI_boxplot.pdf"), width = 43, height = 43, units = "mm")
 ```
 
-
+##ADDITIONAL##
+Calculations based on WSR.
 Inspect the regression by ROC curves 
 ```{r AUC of the regression}
 #ROC (Receiver operating characteristic) curve
@@ -728,27 +719,22 @@ write.csv(pROC_obj$auc, file=paste0(dir, "auc_SI_WSR.txt"))
 ggsave(pROC, filename = paste0(dir, "ROC_WSR.pdf"), width = 43, height = 43, units = "mm")  
 ```
 
-̛
+
+
+##CORE##
+
+Calculations based on sWSR (i.e. difference from HC mean).
+To further harmonise the WSR values, we standardise case and control values by subtracting the HC mean residual and dividing by the HC standard deviation.
 ```{r change save dir sWSR}
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
+dir <- paste0("~/RNAseq_relative/4_cortical_sets/", subsetname, "/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
 ```
 
 
-
-Calculations based on sWSR (i.e. difference from HC mean)
 ```{r calculate sWSR}
 
 #change directory
 
-dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/sWSR/")
+dir <- paste0("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "fix_lambda/", dataset, "/sWSR/")
 
 #get diagnosis back in
 mean_res_w_info <- mean_res_w %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
@@ -765,13 +751,14 @@ wsr_mean_HC <- mean_res_w_info %>%
   distinct()
 
 #calculate sWSR-value. This is at first how many sd(HC) are the individual value from the mean HC?
-
 sWSR_Set <- mean_res_w_info %>% 
   left_join(wsr_mean_HC, by="gene_id") %>% 
   mutate(sWSR = (wsr- mean_HC)/ sd_HC)
 
 ```
 
+##CORE##
+Calculate each individual's stoichiometric imbalance score (SI), based on each gene's standardised and weighted residuals (sWSR) in that individual. 
 
 ```{r SI score sWSR}
 #calculate SI
@@ -817,6 +804,11 @@ ggsave(plot= SI_sWSR_boxplot, filename = paste0(dir, "SI_sWSR_boxplot.pdf"), wid
 ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43, height = 43, units = "mm")
 
 ```
+
+##CORE##
+##GRAPH##
+
+This analysis forms the basis of the case/ control comparisons. It produces the left part of Table 2. The plot is not used in figures of the paper, Figure 6a is produced in the chunk "combine SI plots density and ROC"
 
 ```{r calculate ttest nagelkerke and auc}
 
@@ -889,17 +881,18 @@ ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43
 
 ```
 
-
-
+##CORE##
+Save a copy of the result marked with dataset name, so that the data can be combined later. 
 ```{r save result for combination}
 sWSR_CMC_HBCC <- sWSR_Set
-sWSR_CMC_Pitt <- sWSR_Set
-sWSR_BipSeq_sACC <- sWSR_Set
-sWSR_GVEX_SMRI <- sWSR_Set
+#sWSR_CMC_Pitt <- sWSR_Set
+#sWSR_BipSeq_sACC <- sWSR_Set
+#sWSR_GVEX_SMRI <- sWSR_Set
 
 ```
 
-
+##GRAPH##
+This will produce the plots for Figure 5a. This is only shown for one dataset, CMC-HBCC, in the paper.
 ```{r raster plot sWSR CMC-HBCC}
 col2 <- colorRampPalette(c("#67001F", "#B2182B", "#D6604D", "#F4A582",
                            "#FDDBC7", "#FFFFFF", "#D1E5F0", "#92C5DE",
@@ -932,8 +925,6 @@ SI_BD$SampleID <-
   factor(SI_BD$SampleID, levels=unique(SI_BD$SampleID))
 
 
-
-
 BD_SI_sWSR_HBCC  <- SI_sWSR_HBCC %>% filter(PrimaryDiagnosis == "BD") 
 C_SI_sWSR_HBCC <- SI_sWSR_HBCC %>% filter(PrimaryDiagnosis == "HC")
 
@@ -962,9 +953,6 @@ C_SI_sWSR_HBCC <-
 
 C_SI_sWSR_HBCC$gene_id <-
   factor(C_SI_sWSR_HBCC$gene_id, levels=unique(BD_SI_sWSR_HBCC$gene_id))
-
-
-
 
 
 top_BD_sWSR_genes <- sWSR_CMC_HBCC %>% filter(PrimaryDiagnosis == "BD") %>% group_by(gene_id) %>%  summarise(mean_BD = mean(abs(sWSR))) %>% arrange(desc(mean_BD)) %>%  head(n=32) %>%  select(gene_id)
@@ -1065,44 +1053,20 @@ ggsave(plot =p4, filename = paste0(dir,"BD_sWSR_SI.tiff") )
 ```
 
 
-
+##CORE##
 When all 4 cortical sets are done - cross validation and predicted probabilities
-
-```{r logistic regression based on sWSR sWSR split by dataset}
-#import sWSR data
-
-# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC_HBCC/sWSR/sWSR.txt")
-# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-Pitt/sWSR/sWSR.txt")
-# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/GVEX-SMRI/sWSR/sWSR.txt")
-# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/BipSeq-sACC/sWSR/sWSR.txt")
-# 
-# 
-# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CMC-HBCC/sWSR/sWSR.txt")
-# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CMC-Pitt/sWSR/sWSR.txt")
-# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/GVEX-SMRI/sWSR/sWSR.txt")
-# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/BipSeq-sACC/sWSR/sWSR.txt")
-# 
-# 
-# 
-# #"old" sWSR values, to test the new version of the code.
-# # sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/wsr/wsr_t.txt")
-# # sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_unstr/Pitt/wsr/wsr_t.txt")
-# # sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BrainGVEX/06_lasso_model/results/RPKM/high_L2G_nearest/wsr/wsr_t.txt") 
-# # sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BipSeq/06_lasso_model/RPKM/sACC/wsr/wsr_t.txt")
-# # 
-# 
-# sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CMC-HBCC/sWSR/sWSR.txt")
-# sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CMC-Pitt/sWSR/sWSR.txt")
-# sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/GVEX-SMRI/sWSR/sWSR.txt")
-# sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/BipSeq-sACC/sWSR/sWSR.txt")
-
-sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
-sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
-sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
-sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
+import sWSR data if necessary (produced above)
+```{r logistic regression based on sWSR sWSR split by dataset, eval=FALSE}
+#import sWSR data if necessary
+sWSR_CMC_HBCC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
+sWSR_CMC_Pitt <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
+sWSR_GVEX_SMRI <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
+sWSR_BipSeq_sACC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
 
 ```
 
+##CORE##
+Combine all 4 sets of sWSR results into one harmonised dataset
 ```{r combine sWSR}
 sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
                                  "CMC-Pitt" = sWSR_CMC_Pitt,
@@ -1122,6 +1086,9 @@ sWSR_wide <- sWSR_wide %>% drop_na() #remove samples with missing values (probab
 sWSR_wide$PrimaryDiagnosis <- factor(sWSR_wide$PrimaryDiagnosis, levels = c("HC", "BD"))
 ```
 
+
+##GRAPH##
+This will produce the plots for Figure 6a and 6b
 ```{r combine SI plots density and ROC}
 #calculate SI
 SI_sWSR_all <- sWSR_all %>% 
@@ -1150,7 +1117,6 @@ SI_sWSR_all_dens <-
     facet_wrap(~ Set, nrow = 1,scales = "free_x") +
     scale_x_continuous( breaks= c(0, 0.5, 1, 1.5), limits = c(0,2) ) 
 
-#ggsave(SI_sWSR_all_dens, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/SI_dens_all_adjX.pdf", width = 9, height = 4.2, units= "cm")
 
 ggsave(SI_sWSR_all_dens, filename = paste0(dir, "SI_dens_all_adjX.pdf"), width = 9, height = 4.2, units= "cm")
 
@@ -1208,24 +1174,13 @@ ROC_SI <-
 
 
 ggsave(plot =ROC_SI, filename = paste0(dir,"ROC_SI.pdf"), width = 43, height = 43, units = "mm" )
-
-
-
 ```
 
 
-
+##CORE##
+The following analysis uses the sWSR from 3 datasets to model and predict the diagnosis in the 4th dataset. This cross-validation is repeated for each dataset.
 
 ```{r logistic regression with cross validation}
-#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CV_prob/"
-#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/CV_prob/"
-#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/CV_prob/"
-#dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CV_prob/"
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff_lasso/CV_prob/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/original_gene_selection/CV_prob/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/keep_TRPT1_LMAN2L/CV_prob/")
-
-
 pROC_obj <- list()
 glm_sWSR_4datasets <- list()
 sWSR_wide_testset <- list()
@@ -1312,6 +1267,9 @@ sWSR_prob <- sWSR_prob %>%
 sWSR_prob$Set <- factor(sWSR_prob$Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
 ```
 
+
+##GRAPH##
+This produces plots for Figure 6d
 ```{r plot ROC curves}
 
 colours <- brewer.pal(n= 4, name = "Dark2")
@@ -1351,6 +1309,8 @@ ggsave(plot =ROC_glm_CV_sWSR, filename = paste0(dir,"ROC_glm_CV_sWSR.pdf"), widt
 
 ```
 
+##GRAPH##
+This produces plots for Figure 4a, i.e. the patterns of case-control differences in WSR across datasets.
 ```{r plot WSR boxplots}
 plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
 
@@ -1390,7 +1350,8 @@ p_white <-
 
 
 
-
+##GRAPH##
+This produces plots for Figure 6c, i.e the density plots of predicted probabilities based on sWSR in the other 3 datasets (cross-validation). The p, AUC and R^2 on the liability scale (Table 2 middle), are also produced here. The coefficients from each dataset is stored in Table S4.
 ```{r investigating the predicted probabilities further}
 sWSR_prob_wilcox <- sWSR_prob %>%  group_by(Set) %>% wilcox_test(prob ~ PrimaryDiagnosis, ref.group = "HC")
 
@@ -1471,7 +1432,8 @@ write.csv(gene_list, paste0(dir, "gene_list.txt"))
 ```
 
 
-FInd genes where sWSR has predictive power, glm() on sWSR all cortical sets
+##ADDITIONAL##
+Find genes where sWSR has predictive power, glm() on sWSR all cortical sets. The results from this analysis are found in Table S9.
 ```{r glm on sWSR all cortical sets}
 sWSR_wide <- sWSR_wide %>% select(-Set, -SampleID)
 
@@ -1485,9 +1447,11 @@ write_tsv(glm_sWSR_all_coefficients, paste0(dir, "glm_sWSR_all_coefficients.txt"
 ```
 
 
-
+##GRAPH##
+This will produce the plot for Figure 4b.
+P-values from the comparison between HC and BD mean residuals for all four datasets (gene ordering identical to Figure 2). Colours indicate direction of difference; red higher in BD and blue lower in BD (p-value < 0.15). Small dots indicate nominal significance (p < 0.05) and large dots indicate significant p-value (FDR < 0.05 across all genes and datasets). 
 ```{r plot sWSR DE}
-order.CMC_HBCC.gene_id <- read.csv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/order.CMC_HBCC.gene_id.txt") #as calculated from correlation matrix in DE_absolute_v08.Rmd
+order.CMC_HBCC.gene_id <- read.csv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/order.CMC_HBCC.gene_id.txt") #as calculated from correlation matrix in DE_absolute_v08.Rmd
 order.CMC_HBCC.gene_id <- order.CMC_HBCC.gene_id$x
 
 
@@ -1578,6 +1542,11 @@ statistic <-
 ```
 
 
+
+##CORE##
+##GRAPH##
+This analysis addresses the question on how many genes in each individual are responsible for the stoichiometric imbalance observed.
+The plots herein are found in Figure 5c
 ```{r polygenic architecture genes per ind}
 thr <- 2
 
@@ -1619,6 +1588,167 @@ SI2_number_thr  %>% group_by(Set, PrimaryDiagnosis) %>%  mutate(median_n= median
     ggsave(SI2_number_GENEperIND_thr_combined , filename = paste0(dir, "GENEperIND.pdf") , height=4.3, width=8, units = "cm")
 ```
 
+##CORE##
+##GRAPH##
+Rank the genes according to how many BD samples are imbalanced (abs(sWSR) >2). The plot here is found in Figure S6.
+```{r bar chart SI genes}
+library(tidytext)
+thr<- 2
+
+#ordered bar-chart to count how many samples are disrupted at +/- thr sd for genes. Identifies which genes they are
+#genes_ind_per_gene <- 
+
+sWSR_all$Set <- factor(sWSR_all$Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
+
+genes_SI_BD <- 
+  sWSR_all %>% 
+     left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+   group_by(Set, gene_id, PrimaryDiagnosis) %>% 
+   mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+   add_tally(wt=sd_thr) %>%      
+  select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>% 
+  mutate(n_norm = n/n_ind ) %>% 
+  filter(PrimaryDiagnosis== "BD") %>% 
+   ggplot(aes(x=reorder_within(x = gene_id, by = -n, within= Set))) + 
+    geom_col(aes(y=n_norm)) +
+  scale_x_reordered()+
+    theme(axis.text.x = element_text(angle=90, size = 6)) +
+    xlab("gene_id") + 
+    ylab(paste("Fraction BD samples with |sWSR| > 2")) +
+    theme(axis.text.x = element_text(size=5, hjust=1, angle = 90, vjust = 1.1),
+          strip.background.x  = element_rect(fill  = "white" )) + 
+    facet_wrap(vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free",
+               nrow= 3, ncol= 2)
+ #facet_grid(cols=vars(Set), scales= "free")# +
+ #facet_grid( rows=vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free")
+#+ coord_flip()
+  
+ggsave(genes_SI_BD, filename = paste0(dir, "genes_prop_thr_BD.pdf"), width= 18,  units= "cm")
+
+
+```
+
+
+##CORE##
+Look for batch effects in sWSR values between sets. This plot is seen in Figure S3c
+```{r PCA sWSR}
+sWSR_CMC_HBCC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
+sWSR_CMC_Pitt <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
+sWSR_GVEX_SMRI <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
+sWSR_BipSeq_sACC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
+
+sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
+                                 "CMC-Pitt" = sWSR_CMC_Pitt,
+                                "GVEX-SMRI"= sWSR_GVEX_SMRI,  
+                                "BipSeq-sACC"= sWSR_BipSeq_sACC, 
+                                 .id = "Set")
+
+sWSR_wide <- 
+  sWSR_all %>% 
+  select(Set, gene_id, SampleID, PrimaryDiagnosis, sWSR) %>% 
+  pivot_wider(names_from = gene_id, values_from = sWSR)
+
+sWSR_wide <- sWSR_wide %>%  select_if(~ !any(is.na(.))) # remove genes with missing values. EBLN3P is not in GVEX
+sWSR_wide <- sWSR_wide %>% drop_na() #remove samples with missing values (probably REDUNDANT now)
+
+sWSR_wide$PrimaryDiagnosis <- factor(sWSR_wide$PrimaryDiagnosis, levels = c("HC", "BD"))
+
+
+sWSR_wide <- sWSR_wide %>%  column_to_rownames(var= "SampleID")
+
+pca.sWSR_all <- prcomp(sWSR_wide[, -c(1,2)], center = TRUE, scale. = TRUE)
+plot(pca.sWSR_all$x)
+
+pca.PC1_PC2 <- as.data.frame(pca.sWSR_all$x[,1:2])
+
+pca.PC1_PC2_info <- 
+  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
+  left_join(info_all, by= "SampleID")
+
+pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
+
+pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
+
+#  mutate(outlier= ifelse(SampleID %in% remove_PCA, "outlier", "not outlier")) %>% 
+  PCA_sWSR_diag <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = PrimaryDiagnosis), 
+      size= 0.8
+    ) +
+      scale_color_manual(values = cols)
+   # scale_color_brewer(palette = "Dark2") 
+
+  
+    PCA_sWSR_set <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = Set), 
+      size= 0.8
+    ) +
+#      scale_color_manual(values = cols)
+   scale_color_brewer(palette = "Dark2") 
+
+
+   dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/"
+ggsave(plot= PCA_sWSR_set, filename = paste0(dir, "PCA_sWSR.pdf"), width = 89, height = 89, units = "mm")
+ggsave(plot= PCA_sWSR_diag, filename = paste0(dir, "PCA_sWSR_diag.pdf"), width = 89, height = 89, units = "mm")
+```
+
+
+##CORE##
+Look for batch effects in expression values between sets. This plot is seen in Figure S3a.
+
+```{r PCA expression}
+subset <- high_L2G_closest$symbol
+
+rpkm_log_all_subset <- rpkm_log_all[rownames(rpkm_log_all) %in% subset,]
+
+rpkm_log_subset_t <- t(rpkm_log_all_subset)
+
+
+pca.rpkm_subset <- prcomp(rpkm_log_subset_t, center = TRUE, scale. = TRUE)
+plot(pca.rpkm_subset$x)
+
+pca.PC1_PC2 <- as.data.frame(pca.rpkm_subset$x[,1:2])
+
+pca.PC1_PC2_info <- 
+  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
+  left_join(info_all, by= "SampleID")
+
+pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
+
+pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
+
+   PCA_rpkm_subset_set <- 
+    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
+  geom_point(
+    aes(
+     # shape=outlier, 
+      colour = Set), 
+      size= 0.8
+    ) +
+#      scale_color_manual(values = cols)
+   scale_color_brewer(palette = "Dark2") 
+    
+    
+    ggsave(plot= PCA_rpkm_subset_set, filename = paste0(dir, "PCA_rpkm_subset_set.pdf"), width = 89, height = 89, units = "mm")
+    
+        ggsave(plot= PCA_rpkm_subset_set, filename = paste0("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "PCA_rpkm_subset_res_set.pdf"), width = 89, height = 89, units = "mm")
+    
+```
+
+
+
+
+##CORE##
+##GRAPH##
+This analysis addresses the question on how many individuals are stoichiometric imbalanced for each gene.
+The plots herein are found in Figure 5d.
 
 ```{r polygenic architecture ind per gene}
 
@@ -1710,6 +1840,32 @@ ggsave(SI2_prop_INDperGENE_thr_split, filename = paste0(dir, "INDperGENE_split_S
 ```
 
 
+##ADDITIONAL##
+Find the top 10 imbalanced genes among BD cases
+```{r genes consistently imbalanced}
+
+#find top 10 imbalanced genes among BD cases
+#have tested- there is no difference to the results if all samples are included, since BD are the top anyway
+
+sWSR_all %>%
+left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
+group_by(Set, gene_id, PrimaryDiagnosis) %>%
+mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
+add_tally(wt=sd_thr) %>%
+select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>%
+mutate(n_norm = n/n_ind ) %>%
+filter(PrimaryDiagnosis== "BD") %>% arrange(desc(n_norm)) %>% group_by(Set) %>%  slice(1:10) %>% ungroup() %>%  count(gene_id) %>%  arrange(desc(n))
+
+#genes 3/4 imbalanced:
+#C15orf40 (not GVEX-SMRI)    
+#FKBP2      (Not CMC-Pitt)
+#PBRM1        (not BipSeq-sACC)
+```
+
+
+##ADDITIONAL##
+Investigate if only a few genes are enough to detect SI and predict diagnosis. Rank the genes according to sWSR, and gradually increase more genes from the top in estimating AUC. The downside of this analysis is that the sWSR values are based on models with all genes of interest, not only the ones used for AUC calculation.   
+This analysis is not in the paper. 
 ```{r rank genes based on BD wsr_t}
 
 sum_sWSR_gene <- sWSR_all %>%
@@ -1849,6 +2005,10 @@ ggsave(plot =auc_increasing_genes_sWSR_all, filename = paste0(dir, "auc_increasi
 
 ```
 
+
+##ADDITIONAL##
+Investigate whether we can get better separation cases/ controls if we only include the genes with the strongest signal. Here we use the 15 top genes for each dataset and analyse as we did with all genes of interest above. 
+This analysis is not in the paper. 
 ```{r SI score performance sWSR 15 top genes specific}
 #the genes are ranked according to sWSR SI in BD in the list gene_rank
 
@@ -1864,7 +2024,7 @@ for(dataset in c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC")){
 
 #r SI score sWSR_15
 #select n best genes within set
-top_genes <- 10 
+top_genes <- 15
   
 GOI <- gene_rank[[dataset]][1:top_genes]
   
@@ -1921,9 +2081,9 @@ SI_15best[[dataset]] <- SI_sWSR_15genes_best_set
 ```
 
 ```{r save results 15 best within set}
-#save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/incr_gene_SI/15best/"
+#save_dir <-  "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/incr_gene_SI/15best/"
 
-save_dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/fix_lambda/incr_gene_SI/15best/"
+save_dir <-  "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/fix_lambda/incr_gene_SI/15best/"
 
 write_tsv(gene_rank_all, file = paste0(save_dir, "gene_rank_all.txt" ))
 write_tsv(SI_all_15best, file = paste0(save_dir, "SI_sWSR_15genes_best.txt" ))
@@ -1935,15 +2095,9 @@ write_tsv(results_15best_all, file= paste0(save_dir, "results_10best.txt"))
 
 
 
-
-
-
-
-
-
-
-
-
+##ADDITIONAL##
+Investigate whether we can get better separation cases/ controls if we only include the genes with consistent signal across datasets. Here we use the 15 top genes that are in common for all datasets and analyse as we did with all genes of interest above. 
+This analysis is not in the paper.
 ```{r common rank based on BD sWSR}
 
 rank_common_sWSR <- sWSR_all %>% 
@@ -2071,9 +2225,6 @@ ggsave(plot =auc_increasing_genes_common_sWSR_all, filename = paste0(dir, "auc_i
 ```
 
 
-
-
-
 ```{r sWSR_15_common}
 #import sWSR
 sWSR_all %>%  head()
@@ -2147,185 +2298,15 @@ write_tsv(results_15common, file= paste0(dir, "results_15common.txt"))
 
 
 
-
-```{r bar chart SI genes}
-library(tidytext)
-thr<- 2
-
-#ordered bar-chart to count how many samples are disrupted at +/- thr sd for genes. Identifies which genes they are
-#genes_ind_per_gene <- 
-
-sWSR_all$Set <- factor(sWSR_all$Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC"))
-
-genes_SI_BD <- 
-  sWSR_all %>% 
-     left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
-   group_by(Set, gene_id, PrimaryDiagnosis) %>% 
-   mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
-   add_tally(wt=sd_thr) %>%      
-  select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>% 
-  mutate(n_norm = n/n_ind ) %>% 
-  filter(PrimaryDiagnosis== "BD") %>% 
-   ggplot(aes(x=reorder_within(x = gene_id, by = -n, within= Set))) + 
-    geom_col(aes(y=n_norm)) +
-  scale_x_reordered()+
-    theme(axis.text.x = element_text(angle=90, size = 6)) +
-    xlab("gene_id") + 
-    ylab(paste("Fraction BD samples with |sWSR| > 2")) +
-    theme(axis.text.x = element_text(size=5, hjust=1, angle = 90, vjust = 1.1),
-          strip.background.x  = element_rect(fill  = "white" )) + 
-    facet_wrap(vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free",
-               nrow= 3, ncol= 2)
- #facet_grid(cols=vars(Set), scales= "free")# +
- #facet_grid( rows=vars(factor(Set, levels = c("CMC-HBCC", "CMC-Pitt","GVEX-SMRI", "BipSeq-sACC",  "BipSeq-Amg"))), scales= "free")
-#+ coord_flip()
-  
-ggsave(genes_SI_BD, filename = paste0(dir, "genes_prop_thr_BD.pdf"), width= 18,  units= "cm")
-
-
-```
-
-```{r genes consistently imbalanced}
-
-#find top 10 imbalanced genes among BD cases
-#have tested- there is no difference to the results if all samples are included, since BD are the top anyway
-
-sWSR_all %>%
-left_join(sWSR_samples, by=c("Set", "PrimaryDiagnosis")) %>% #include total count of individuals per set and diagnosis
-group_by(Set, gene_id, PrimaryDiagnosis) %>%
-mutate(sd_thr =  abs(sWSR) > thr) %>% #True if disrupted
-add_tally(wt=sd_thr) %>%
-select(gene_id,  PrimaryDiagnosis, n, n_ind, Set) %>% distinct() %>%
-mutate(n_norm = n/n_ind ) %>%
-filter(PrimaryDiagnosis== "BD") %>% arrange(desc(n_norm)) %>% group_by(Set) %>%  slice(1:10) %>% ungroup() %>%  count(gene_id) %>%  arrange(desc(n))
-
-#genes 3/4 imbalanced:
-#C15orf40 (not GVEX-SMRI)    
-#FKBP2      (Not CMC-Pitt)
-#PBRM1        (not BipSeq-sACC)
-```
-
-
-Look for batch effects in sWSR values between sets
-```{r PCA sWSR}
-sWSR_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-HBCC/sWSR/sWSR.txt")
-sWSR_CMC_Pitt <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/CMC-Pitt/sWSR/sWSR.txt")
-sWSR_GVEX_SMRI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/GVEX-SMRI/sWSR/sWSR.txt")
-sWSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BipSeq-sACC/sWSR/sWSR.txt")
-
-sWSR_all <- bind_rows("CMC-HBCC"= sWSR_CMC_HBCC,
-                                 "CMC-Pitt" = sWSR_CMC_Pitt,
-                                "GVEX-SMRI"= sWSR_GVEX_SMRI,  
-                                "BipSeq-sACC"= sWSR_BipSeq_sACC, 
-                                 .id = "Set")
-
-sWSR_wide <- 
-  sWSR_all %>% 
-  select(Set, gene_id, SampleID, PrimaryDiagnosis, sWSR) %>% 
-  pivot_wider(names_from = gene_id, values_from = sWSR)
-
-sWSR_wide <- sWSR_wide %>%  select_if(~ !any(is.na(.))) # remove genes with missing values. EBLN3P is not in GVEX
-sWSR_wide <- sWSR_wide %>% drop_na() #remove samples with missing values (probably REDUNDANT now)
-
-sWSR_wide$PrimaryDiagnosis <- factor(sWSR_wide$PrimaryDiagnosis, levels = c("HC", "BD"))
-
-
-sWSR_wide <- sWSR_wide %>%  column_to_rownames(var= "SampleID")
-
-pca.sWSR_all <- prcomp(sWSR_wide[, -c(1,2)], center = TRUE, scale. = TRUE)
-plot(pca.sWSR_all$x)
-
-pca.PC1_PC2 <- as.data.frame(pca.sWSR_all$x[,1:2])
-
-pca.PC1_PC2_info <- 
-  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
-  left_join(info_all, by= "SampleID")
-
-pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
-
-pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
-
-#  mutate(outlier= ifelse(SampleID %in% remove_PCA, "outlier", "not outlier")) %>% 
-  PCA_sWSR_diag <- 
-    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
-  geom_point(
-    aes(
-     # shape=outlier, 
-      colour = PrimaryDiagnosis), 
-      size= 0.8
-    ) +
-      scale_color_manual(values = cols)
-   # scale_color_brewer(palette = "Dark2") 
-
-  
-    PCA_sWSR_set <- 
-    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
-  geom_point(
-    aes(
-     # shape=outlier, 
-      colour = Set), 
-      size= 0.8
-    ) +
-#      scale_color_manual(values = cols)
-   scale_color_brewer(palette = "Dark2") 
-
-
-   dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/"
-ggsave(plot= PCA_sWSR_set, filename = paste0(dir, "PCA_sWSR.pdf"), width = 89, height = 89, units = "mm")
-ggsave(plot= PCA_sWSR_diag, filename = paste0(dir, "PCA_sWSR_diag.pdf"), width = 89, height = 89, units = "mm")
-```
-
-Look for batch effects in expression values between sets
-
-```{r}
-subset <- high_L2G_closest$symbol
-
-rpkm_log_all_subset <- rpkm_log_all[rownames(rpkm_log_all) %in% subset,]
-
-rpkm_log_subset_t <- t(rpkm_log_all_subset)
-
-
-pca.rpkm_subset <- prcomp(rpkm_log_subset_t, center = TRUE, scale. = TRUE)
-plot(pca.rpkm_subset$x)
-
-pca.PC1_PC2 <- as.data.frame(pca.rpkm_subset$x[,1:2])
-
-pca.PC1_PC2_info <- 
-  as_tibble(pca.PC1_PC2 , rownames = "SampleID") %>% 
-  left_join(info_all, by= "SampleID")
-
-pca.PC1_PC2_info$Set <-   factor(pca.PC1_PC2_info$Set, levels = c("CMC-HBCC", "CMC-Pitt", "GVEX-SMRI", "BipSeq-sACC"))  
-
-pca.PC1_PC2_info$PrimaryDiagnosis <-   factor(pca.PC1_PC2_info$PrimaryDiagnosis, levels = c("HC", "BD"))  
-
-   PCA_rpkm_subset_set <- 
-    ggplot(data =pca.PC1_PC2_info,  aes(x=PC1, y=PC2))+ 
-  geom_point(
-    aes(
-     # shape=outlier, 
-      colour = Set), 
-      size= 0.8
-    ) +
-#      scale_color_manual(values = cols)
-   scale_color_brewer(palette = "Dark2") 
-    
-    
-    ggsave(plot= PCA_rpkm_subset_set, filename = paste0(dir, "PCA_rpkm_subset_set.pdf"), width = 89, height = 89, units = "mm")
-    
-        ggsave(plot= PCA_rpkm_subset_set, filename = paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", "PCA_rpkm_subset_res_set.pdf"), width = 89, height = 89, units = "mm")
-    
-```
-
-
-
+##CORE##
 
 control experiment with HC vs HC
-
-
+We use this experiment to see if there are any inherent biases from using the control samples to build the models. We split the control samples into mock control and case set. If we see higher SI in the mock samples, we have detected a bias stemming from the way we build our models. We do not detect any such bias.
 
 ```{r control experiment HC- HC analysis}
 dataset <- "CMC-HBCC"
 dataset <- "BipSeq-sACC"
+#only two datasets with sufficiently many control samples (CMC-HBCC and BipSeq-sACC)
 
 #split HBCC, BipSeq HC in 2, and run modelling and SI score analysis
 set.seed(22)
@@ -2442,8 +2423,6 @@ for(i in 1:it){
 
 ```
 
-
-
 ```{r calculate SI from residuals HC vs HC}
 
 #import residuals and R2 if needed
@@ -2499,8 +2478,8 @@ SI <- rename(SI, "diag" = PrimaryDiagnosis)
 ```
 
 
-
-
+##GRAPH##
+These results are given in Table S8
 ```{r compare C and BD HC vs HC}
 
  options(digits = 5)
@@ -2514,8 +2493,8 @@ kstest <- ks.test( SI_HC2$SI,  SI_HC1$SI)
 
 
 ```{r plot SI density HC vs HC }
-#dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/"
-dir <-  "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/"
+#dir <-  "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/"
+dir <-  "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/"
 
 SI <- SI %>% 
   mutate(split_set = ifelse(SampleID %in% HC1$SampleID, 
@@ -2545,11 +2524,11 @@ SI_HCvsHC_wtest <- wilcox.test(SI ~ split_set, data = SI)
 #SI_HCvsHC_levene_test_variance <-  
  # leveneTest(SI ~ split_set, data = SI)
 
-#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/"
+#dir <- "~/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/"
 
-#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/swap_HC_split/"
+#dir <- "~/RNAseq_temporal/analysis/OFC/01_CommonMind/06_lasso_model/RPKM/high_L2G_nearest/CM_str/SI_after_iterations/SI_mean_wsr/HCvsHC/swap_HC_split/"
 
-#dir <- "/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/01_BipSeq/06_lasso_model/RPKM/sACC/SI_after_iterations/SI_mean_wsr/HCvsHC/"
+#dir <- "~/RNAseq_temporal/analysis/OFC/01_BipSeq/06_lasso_model/RPKM/sACC/SI_after_iterations/SI_mean_wsr/HCvsHC/"
 
 
 write_tsv(SI, file = paste0(dir,"SI_wsr.txt"))
@@ -2605,15 +2584,17 @@ write.csv( unlist(SI_sWSR_wtest_HCvsHC), file=paste0(dir, "SI_sWSR_ttest.txt"))
 ```
 
 
-
+##GRAPH##
+Patterns of HC1-HC2 differences in WSR when modelling with HC1 samples.
+These plots are found in Figure S5a and b.
 ```{r plot wsr statistics HCvsHC}
 
 #import WSR data
-WSR_CMC_HBCC <- read_tsv( "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/wsr.txt")
+WSR_CMC_HBCC <- read_tsv( "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/wsr.txt")
 
 #WSR_CMC_HBCC <- wsr_HCvsHC
 
-WSR_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/wsr.txt")
+WSR_BipSeq_sACC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/wsr.txt")
 
 #WSR_BipSeq_sACC <- wsr_HCvsHC
 
@@ -2624,8 +2605,8 @@ wsr_HCvsHC_all <- bind_rows("CMC-HBCC"= WSR_CMC_HBCC,
 
 wsr_HCvsHC_all <- wsr_HCvsHC_all %>%  rename("wsr"= mean_res_w)
 #import SI data
-SI_CMC_HBCC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/SI_wsr.txt")
-SI_BipSeq_sACC <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/SI_wsr.txt")
+SI_CMC_HBCC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/CMC-HBCC/SI_wsr.txt")
+SI_BipSeq_sACC <- read_tsv("~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/BipSeq-sACC/SI_wsr.txt")
 
 
 SI_wsr_HCvsHC_all <- bind_rows("CMC-HBCC"= SI_CMC_HBCC,
@@ -2714,7 +2695,7 @@ statistic <-
              lwd=0.1, colour="gray")# Horizonal lines
 
 
-ggsave(statistic, filename = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/statistic_all_sets_HCvsHC.pdf", width=3.32, height= 11.75, units="cm")
+ggsave(statistic, filename = "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/statistic_all_sets_HCvsHC.pdf", width=3.32, height= 11.75, units="cm")
 
 
 plot_genes <- c("CACNA1C", "FADS2", "RASGRP1")
@@ -2736,13 +2717,13 @@ ggplot(aes(x = split_set, y = wsr, color = split_set)) +
          strip.background.x  = element_rect(fill  = "white"))  + ylab("") +
   coord_cartesian(ylim = c(-0.15, 0.15)) 
 
-ggsave(plot=p, path = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/", filename = "compare_wsr_HCvsHC.pdf", width = 5.4, height = 10.48, units = "cm")
+ggsave(plot=p, path = "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/HCvsHC/", filename = "compare_wsr_HCvsHC.pdf", width = 5.4, height = 10.48, units = "cm")
 
 ```
 
 
-
-negative control base model on BD as modelset
+##CORE##
+negative control base model on BD as modelset. using a subset of the cases in each modelling iteration, and then proceeding in the sam way. 
 
 ```{r prepare dataset BD model}
 
@@ -2750,6 +2731,7 @@ negative control base model on BD as modelset
 dataset <- "BipSeq-sACC"
 dataset <- "CMC-HBCC"
 dataset <- "GVEX-SMRI"
+#CMC-Pitt does not have enough BD samples to do meaningful modelling here.
 
 info <- info_all %>%  filter(Set== dataset) 
 #rpkm_log <- rpkm_log_all[,colnames(rpkm_log_all) %in% info$SampleID]
@@ -2903,143 +2885,10 @@ write_tsv(R2_all_long, file= paste0(dir, "R2_", it,"it.txt"))
 
 ```
 
-```{r import control experiment model with cases}
 
-SI <- read_tsv("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BD_model/CMC-HBCC/SI_C_BD_wsr.txt")
-
-```
-
-̛
-```{r compare C and BD BD model}
-SI_C_BD <- SI
-
- options(digits = 5)
-SI_HC <- filter(SI_C_BD, diag=="HC") 
-SI_BD <- filter(SI_C_BD,  diag=="BD")
-ks.test( SI_BD$SI,  SI_HC$SI)
-kstest <- ks.test( SI_BD$SI,  SI_HC$SI)
-
-
-```
-
-
-```{r logistic regression BD model}
-
-info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "Caucasian", replacement = "CAUC") 
-info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "Hispanic", replacement = "HiSP")
-info_all$Ethnicity <- str_replace(info_all$Ethnicity,  pattern = "AS", replacement = "Asian")
-
-info_all$Ethnicity <- factor(info_all$Ethnicity, levels = c("CAUC",             "HiSP" ,            "Asian" ,     "African-American" ,       "Unknown"          ))
-
-
-#SI$diag <- str_replace(SI$diag, pattern = "HC", replacement = "0")
-#SI$diag <- str_replace(SI$diag, pattern = "BD", replacement = "1")
-SI$diag <- as.factor(SI$diag)
-
-
-SI <-  cbind(Ethnicity = info_all$Ethnicity[match(SI$SampleID, info_all$SampleID)], SI)
-#SI <-  cbind(Sex = info_all$ReportedGender[match(SI$SampleID, info_all$SampleID)], SI)
-#SI <-  cbind(Age = info_all$Age[match(SI$SampleID, info_all$SampleID)], SI)
-#SI <-  cbind(Study = info_all$Study[match(SI$SampleID, info_all$SampleID)], SI) #For BrainGVEX
-
-
-SI_matrix <- model.matrix(~ Ethnicity, -1, data = as.data.frame(SI) )
-SI_dummy <- data.frame(SI[ , ! colnames(SI) %in% "Ethnicity"],       # Create dummy data
-                         model.matrix( ~ Ethnicity - 1, as.data.frame(SI)))
-
-
-SI_glm <- glm(diag ~ SI, data= as.data.frame(SI), family = "binomial")
-SI_glm_cov <- glm(diag ~ SI + Ethnicity + Sex + Age,
-       #         +Study, #For BrainGVEX
-                  data= as.data.frame(SI), family = "binomial") #check to see which variables effect outcome
-
-summary <- summary(SI_glm)
-summary_cov <- summary(SI_glm_cov)
-perf <- model_performance(SI_glm)
-
-#show the distribution of SI values as points
-SI_boxplot <- SI %>% 
-  rename(Diagnosis = diag) %>% 
- ggplot( aes(y=SI, x=Diagnosis, colour= Diagnosis))+ 
-  geom_boxplot(outlier.shape = NA) + 
-  geom_jitter(size=0.2) +
-  scale_colour_manual(values=c(cols[2], cols[1]), labels= c("HC", "BD")) +
-  labs(colour="Diagnosis") + 
-  xlab("Diagnosis")+ 
-  theme(legend.key.size = unit(0.5,"line"),
-        legend.position = ""
-        ) + 
-  scale_x_discrete(breaks=c(0,1),
-                    labels=c("HC", "BD")) +
-  ylab("SI score")
-
-SI_ttest <- t.test(SI ~ diag, data = SI)
-SI_wilcox <- wilcox.test(SI ~ diag, data = SI)
-
-#get pseudo R2 from the model
-pseudoR2 <- nagelkerke(SI_glm)
-
-
- r2l <- result_h2l(k=0.02, p=length(BD$SampleID)/(length(HC$SampleID) + length(BD$SampleID)), r2n = pseudoR2$Pseudo.R.squared.for.model.vs.null[3] #take out the Nagelkerke
-                   ) 
-```
-
-```{r save analysis BD model }
-write_tsv(SI, file = paste0(dir,"SI_C_BD_wsr.txt"))
-write.csv(summary$coefficients, file=paste0(dir, "glm_summary.txt"))
-write.csv(summary_cov$coefficients, file=paste0(dir, "glm_covariates_summary.txt"))
-write.csv(perf, file=paste0(dir, "glm_perf.txt"))
-write.csv(pseudoR2$Pseudo.R.squared.for.model.vs.null, file=paste0(dir, "glm_pseudoR2.txt"))
-write.csv( unlist(SI_ttest), file=paste0(dir, "SI_ttest.txt"))
-write.csv( unlist(SI_wilcox), file=paste0(dir, "SI_wilcox.txt"))
-write.csv(r2l, file=paste0(dir, "nagelkerke_liab.txt"))
-write.csv(as.data.frame(unlist(kstest)), file = paste0(dir,"SI_kstest.txt"))
-ggsave(plot= SI_boxplot, filename = paste0(dir, "SI_boxplot.pdf"), width = 43, height = 43, units = "mm")
-```
-
-
-Inspect the regression by ROC curves 
-```{r AUC of the regression BD model}
-#ROC (Receiver operating characteristic) curve
-pROC_obj <- roc(SI$diag,SI$SI,
-                direction= "<", #when cases have lower SI, we need to force the direction
-            smoothed = TRUE,
-            # arguments for ci
-            ci=TRUE, ci.alpha=0.9, stratified=FALSE,
-            # arguments for plot
-            plot=TRUE, auc.polygon=TRUE, max.auc.polygon=TRUE, grid=TRUE,
-            print.auc=TRUE, show.thres=TRUE)
-sens.ci <- ci.se(pROC_obj)
-
-
-sens_ci_fix <- as_tibble(sens.ci, rownames = "spec")
-sens_ci_fix$spec <- as.numeric(sens_ci_fix$spec)
-
-pROC <- 
-  ggroc(pROC_obj, size=0.5) + 
-  geom_abline(slope=1, intercept = 1, linetype = "dashed", alpha=0.7, color = "black") +
-  geom_ribbon(data = sens_ci_fix, 
-              aes(x = spec, ymin = `2.5%`, ymax = `97.5%`), 
-              fill = "#053061", alpha= 0.2) +
-  xlab("Specificity") + ylab("Sensitivity")
-
-write.csv(pROC_obj$auc, file=paste0(dir, "auc_SI_WSR.txt"))
-ggsave(pROC, filename = paste0(dir, "ROC_WSR.pdf"), width = 43, height = 43, units = "mm")  
-```
-
+BD model:
 Calculations based on sWSR (i.e. difference from HC mean)
 ```{r calculate sWSR BD model}
-
-#change directory
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda_model/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_model/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/free_coeff/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "free_coeff_lasso/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "original_gene_selection/", dataset, "/sWSR/")
-#dir <- paste0("/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/", "keep_TRPT1_LMAN2L/", dataset, "/sWSR/")
-
 #get diagnosis back in
 mean_res_w_info <- mean_res_w %>% left_join(select(info, SampleID, PrimaryDiagnosis), by= "SampleID")
 mean_res_w_info <- mean_res_w_info %>%  rename("wsr"= mean_res_w)
@@ -3107,6 +2956,9 @@ ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43
 
 ```
 
+
+##GRAPH## 
+These results are presented in Table S7.
 ```{r calculate ttest nagelkerke and auc BD model}
 
 SI_sWSR_ttest <- t.test(SI ~ diag, data = SI_sWSR)
@@ -3166,10 +3018,11 @@ ggsave(plot = SI_sWSR_dens, filename = paste0(dir, "SI_density.pdf"), width = 43
 ```
 
 
-
+##GRAPH## 
+These plots are found in Figure S4a and b
 ```{r tstats wsr BD model}
 
-dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BD_model/"
+dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/lasso_cv_lambda-1se_fixed_covarites/BD_model/"
 
 
 sWSR_model_BD_CMC_HBCC <- read_tsv( paste0(dir,  "CMC-HBCC/", "sWSR/sWSR.txt"))
