@@ -5,6 +5,7 @@ date: "3/6/2023"
 output: html_document
 ---
 
+Setup themes for figures and import background functions
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(message = FALSE)
 library(tidyverse)
@@ -22,15 +23,15 @@ library(rstatix)
 theme_set(theme_bw()) #change default ggplot background
 theme_update(text= element_text(size = 7, family = "sans"))
 #import self-made functions
-source("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/07_common_scripts/functions.R")
+source("~/RNAseq_temporal/analysis/OFC/07_common_scripts/functions.R")
 cols <- scales::viridis_pal()(3)[c(3,2)] #yellow and green
-high_L2G <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/genes_l2g_0.5_locus.txt")
-high_L2G_closest <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/genes_of_interest/OpenTargets/loci_missing_nearest.txt")
+high_L2G <- read_tsv("~/RNAseq_temporal/genes_of_interest/OpenTargets/genes_l2g_0.5_locus.txt")
+high_L2G_closest <- read_tsv("~/RNAseq_temporal/genes_of_interest/OpenTargets/loci_missing_nearest.txt")
 high_L2G_closest <- high_L2G_closest %>% rename("symbol"= Nearest_gene) %>%
 bind_rows( select(high_L2G, symbol, Locus)) %>%  distinct()
 subset <- high_L2G_closest$symbol
 subsetname <- "high_L2G_closest"
-#genes_res_diff <- read_tsv("/Users/asbjorh/PhD/RNAseq_temporal/analysis/OFC/core_genes_consistent_res_diff.txt", col_names = FALSE)
+#genes_res_diff <- read_tsv("~/RNAseq_temporal/analysis/OFC/core_genes_consistent_res_diff.txt", col_names = FALSE)
 #subset <- genes_res_diff$X1
 #subsetname <- "genes_res_diff_22"
 #library(conflicted)
@@ -49,26 +50,26 @@ theta <- i * ((p - k)/(1 - k)) * (i * ((p - k) / ( 1 - k)) - x)
 e <- 1 - p^(2 * p) * (1 - p)^(2 * (1 - p))
 h2l <- cc * e * r2n / (1 + cc * e * theta * r2n)
 }
-
-
 ```
 
 
+##CORE##
+Start with gene count data from PsychEncode. Normalise with edgeR and produce log2 RPKM, working on each of the 4 datasets separately.
 
 ```{r import count data}
-count_GVEX <- read.csv("/Users/asbjorh/PhD/RNAseq_DE/count_GVEX.txt")
+count_GVEX <- read.csv("~/RNAseq_DE/count_GVEX.txt")
 count_GVEX <- rename(count_GVEX, "gene_id" = X)
 colnames(count_GVEX) <- sub("^X", "", colnames(count_GVEX))
 colnames(count_GVEX) <- sub("\\.", "-", colnames(count_GVEX))
-count_BipSeq <- read.csv("/Users/asbjorh/PhD/RNAseq_DE/count_BipSeq.txt")
+count_BipSeq <- read.csv("~/RNAseq_DE/count_BipSeq.txt")
 count_BipSeq <- count_BipSeq[, !colnames(count_BipSeq) %in% "X"]
 count_BipSeq <- rename(count_BipSeq, "gene_id" = Id)
-count_CM <- read.csv("/Users/asbjorh/PhD/RNAseq_DE/count_CMC.txt")
+count_CM <- read.csv("~/RNAseq_DE/count_CMC.txt")
 count_CM <- count_CM[, !colnames(count_CM) %in% "X"]
 gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
 dir
-#dir.create("/Users/asbjorh/PhD/RNAseq_DE")
-dir <- "/Users/asbjorh/PhD/RNAseq_DE/"
+#dir.create("~/RNAseq_DE")
+dir <- "~/RNAseq_DE/"
 gene.length <- read_tsv( paste0(dir, "gene.length.tsv")) # these are lengths from ensembl, either canonical transcript, or median length if no canonical is defined.
 count_BipSeq$gene_id <- gsub("\\..*","",count_BipSeq$gene_id) #remove the .* substring from Ensembl to find the names in txdb
 count_BipSeq <- count_BipSeq[!rev(duplicated(rev(count_BipSeq$gene_id))),]
@@ -90,9 +91,9 @@ info_BipSeq_sACC <- info_BipSeq %>%  filter(SampleID %in% samples_BipSeq_sACC$Sa
 
 
 ```{r combine sample info}
-BipSeq_info <- read_xlsx("/Users/asbjorh/PhD/RNAseq_temporal/data/BipSeq/amygdala_sACC/counts/BipSeq_Metadata-distr20221110.xlsx")
+BipSeq_info <- read_xlsx("~/RNAseq_temporal/data/BipSeq/amygdala_sACC/counts/BipSeq_Metadata-distr20221110.xlsx")
 library(readxl)
-BipSeq_info <- read_xlsx("/Users/asbjorh/PhD/RNAseq_temporal/data/BipSeq/amygdala_sACC/counts/BipSeq_Metadata-distr20221110.xlsx")
+BipSeq_info <- read_xlsx("~/RNAseq_temporal/data/BipSeq/amygdala_sACC/counts/BipSeq_Metadata-distr20221110.xlsx")
 BipSeq_info <-   BipSeq_info %>% select(SampleID, RNum,  BrNum,   RIN, BrainRegion, AgeDeath, Sex,   Race,     pH,   PMI, PrimaryDx, numReads, numMapped, numUnmapped)
 BipSeq_info <-  janitor::clean_names(BipSeq_info, case= "upper_camel")
 info_BipSeq <- BipSeq_info
@@ -108,9 +109,9 @@ info_BipSeq$ReportedGender <- str_replace(info_BipSeq$ReportedGender,"F", "Femal
 info_BipSeq$ReportedGender <- str_replace(info_BipSeq$ReportedGender,"^M", "Male")
 info_BipSeq$PrimaryDiagnosis <- str_replace(info_BipSeq$PrimaryDiagnosis ,"Control", "HC")
 info_BipSeq$PrimaryDiagnosis <- str_replace(info_BipSeq$PrimaryDiagnosis ,"Bipolar", "BD")
-info_GVEX_seq <- read_tsv("/Users/asbjorh/PhD/Psychencode/data/SYNAPSE_METADATA_MANIFEST.tsv")
+info_GVEX_seq <- read_tsv("~/Psychencode/data/SYNAPSE_METADATA_MANIFEST.tsv")
 info_GVEX_seq <- info_GVEX_seq %>% select( individualID, tissue, RIN, BrodmannArea, hemisphere, RIN, pH)
-info_GVEX_clin <- read_csv("/Users/asbjorh/PhD/Psychencode/individual_BrainGVEX_metadata.csv")
+info_GVEX_clin <- read_csv("~/Psychencode/individual_BrainGVEX_metadata.csv")
 info_GVEX_clin <- info_GVEX_clin %>% select(individualID, individualIDSource, reportedGender, primaryDiagnosis, PMI, ageDeath, causeDeath, ethnicity)
 info_GVEX <- left_join(info_GVEX_seq, info_GVEX_clin, by = "individualID")
 info_GVEX$ageDeath <- as.numeric(info_GVEX$ageDeath)
@@ -136,9 +137,9 @@ info_GVEX$PrimaryDiagnosis <- str_replace(info_GVEX$PrimaryDiagnosis ,"Bipolar D
 info_GVEX <- distinct(info_GVEX)
 info_GVEX <- info_GVEX %>%  separate(Study, into = c("Study", "substudy"), sep = " ")
 info_GVEX %>%  head()
-info_CM_seq <- read_csv("/Users/asbjorh/PhD/RNAseq_temporal/data/CommonMind_release3/CMC_Human_rnaSeq_metadata.csv")
+info_CM_seq <- read_csv("~/RNAseq_temporal/data/CommonMind_release3/CMC_Human_rnaSeq_metadata.csv")
 info_CM_seq <- info_CM_seq %>% select(Individual_ID, SampleID, Study, Brain_Region, Brodmann_Area, RNA_Isolation_Batch, RNA_Prep_Date, RIN, Mapped_Reads)
-info_CM_clin <- read_csv("/Users/asbjorh/PhD/RNAseq_temporal/data/CommonMind_release3/CMC_Human_clinical_metadata.csv")
+info_CM_clin <- read_csv("~/RNAseq_temporal/data/CommonMind_release3/CMC_Human_clinical_metadata.csv")
 info_CM_clin <- info_CM_clin %>% select(`Individual ID`, `Reported Gender`, Dx, `PMI (in hours)`, `Age of Death`, `Cause of Death`, Ethnicity, institution)
 info_CM <- left_join(info_CM_seq, info_CM_clin, by = c("Individual_ID" = "Individual ID"))
 info_CM$`Age of Death` <- gsub("\\+","",info_CM$`Age of Death`)#take away the "+" in "90+". Will fake a lot of participants of this age, but hopefully ok.
@@ -155,7 +156,7 @@ case= "upper_camel", abbreviations = c("RIN", "PMI", "RNA", "ID"))
 info_CM$PrimaryDiagnosis <- str_replace(info_CM$PrimaryDiagnosis ,"Control", "HC")
 info_CM$PrimaryDiagnosis <- str_replace(info_CM$PrimaryDiagnosis ,"Bipolar", "BD")
 info_CM$PrimaryDiagnosis <- str_replace(info_CM$PrimaryDiagnosis ,"BP", "BD")
-clin_info_cm <- read_delim("/Users/asbjorh/PhD/RNAseq_temporal/data/CommonMind_release3/CMC_Human_clinical_metadata.csv",
+clin_info_cm <- read_delim("~/RNAseq_temporal/data/CommonMind_release3/CMC_Human_clinical_metadata.csv",
 delim=",", col_names = TRUE)
 clin_info_cm <- janitor::clean_names(clin_info_cm)
 info_CM <- left_join(info_CM, select(.data = clin_info_cm ,individual_id , institution), by =  c("IndividualID" = "individual_id"))
@@ -389,6 +390,11 @@ rpkm_log_BipSeq_sACC <- rpkm_Set
 dir
 ```
 
+##CORE##
+##GRAPH##
+Gene expression principal components analysis(PCA). This produces the plot for Figure S1.
+
+
 ```{r PCA HBCC}
 rpkm_log <- rpkm_log_CMC_HBCC
 pca.cm_log <- prcomp(t(rpkm_log[, colnames(rpkm_log) %in% SampleID_str$SampleID]), center = TRUE, scale. = TRUE)
@@ -416,7 +422,7 @@ PCA_CMC_HBCC <-
     scale_color_manual(values = cols) + 
   theme(legend.position = "bottom")
 
-ggsave(PCA_CMC_HBCC, filename = "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/PCA_CMC_HBCC.pdf", height = 8, width = 8, units = "cm")
+ggsave(PCA_CMC_HBCC, filename = "~/RNAseq_DE/4_cortical_sets/PCA_CMC_HBCC.pdf", height = 8, width = 8, units = "cm")
 ```
 
 ```{r PCA rest}
@@ -451,9 +457,9 @@ PCA <-
   theme(legend.position = "none")
 
 
-ggsave(PCA, filename = "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/PCA_CMC_Pitt.pdf", height = 4, width = 4, units = "cm")
-ggsave(PCA, filename = "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/PCA_GVEX_SMRI.pdf", height = 4, width = 4, units = "cm")
-ggsave(PCA, filename = "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/PCA_BipSeq_sACC.pdf", height = 4, width = 4, units = "cm")
+ggsave(PCA, filename = "~/RNAseq_DE/4_cortical_sets/PCA_CMC_Pitt.pdf", height = 4, width = 4, units = "cm")
+ggsave(PCA, filename = "~/RNAseq_DE/4_cortical_sets/PCA_GVEX_SMRI.pdf", height = 4, width = 4, units = "cm")
+ggsave(PCA, filename = "~/RNAseq_DE/4_cortical_sets/PCA_BipSeq_sACC.pdf", height = 4, width = 4, units = "cm")
 
 ```
 
@@ -464,7 +470,6 @@ ggsave(PCA, filename = "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/PCA_BipSeq_
 ```{r create gene subset}
 # Get one gene per GWAS locus
 subset <- high_L2G_closest$symbol
-#subset <- subset[!subset %in% c( "LMAN2L", "TRPT1")] #take away the double entries (2 loci with 2 genes selected). Locus3: CNNM4 is in co-expression module, thus we drop LMAN2L. Locus 40: FKBP2 has lead SNP as coding variant, also slightly higher l2g. (but it is clustering close to TRPT1). 
 subset <- unique(subset) # because 2 loci share a gene.
 length(subset)
 genes_in_all <- rownames(rpkm_log_CMC_HBCC)[rownames(rpkm_log_CMC_HBCC) %in% rownames(rpkm_log_BipSeq_Amg) & rownames(rpkm_log_CMC_HBCC) %in% rownames(rpkm_log_GVEX_SMRI) & rownames(rpkm_log_CMC_HBCC) %in% rownames(rpkm_log_BipSeq_sACC) & rownames(rpkm_log_CMC_HBCC) %in% rownames(rpkm_log_CMC_Pitt)]
@@ -478,17 +483,10 @@ rpkm_log_all <- rpkm_log_all[rownames(rpkm_log_all) %in% genes_in_all,]
 #make sure subset is included in all sets
 subset <- subset[subset %in% rownames(rpkm_log_all)]
 
-
-
-# #random subset
- #set.seed(22)
- set.seed(222)
-# # set.seed(2222)
- random_subset <- sample(genes_in_all[!genes_in_all %in% zandi_DE$GeneSymbol & 
-                                        !genes_in_all %in% high_L2G_closest$symbol], 
-                         size = 52, replace = FALSE) 
- subset <- random_subset
 ```
+
+##ADDITIONAL##
+Simplified analysis looking for differential expression differences between cases and controls. It is a basic wilcoxon differences in mean, and is not in the paper.
 
 ```{r subset expression levels}
 # Pulling out expression of the subset of genes of interest (GWAS or random)
@@ -499,7 +497,7 @@ rpkm_log_subset_all <- rpkm_log_subset_all %>%
 rownames_to_column(var= "gene_id")
 
 
-# Making into long format: 3  basic columsn (gene, sample, expression) + other info (sample set, diagnosis?)
+# Making into long format: 3  basic columns (gene, sample, expression) + other info (sample set, diagnosis?)
 rpkm_log_subset_all_l <-
 rpkm_log_subset_all %>%
 pivot_longer(cols = -1, names_to = "SampleID", values_to = "rpkm_log") %>%
@@ -513,12 +511,18 @@ rpkm_log_DE_wilcox <- rpkm_log_subset_all_l %>%
 write_tsv(rpkm_log_DE_wilcox, paste0(dir, "rpkm_log_DE_wilcox.txt"))
 ```
 
+
+##CORE##
+##GRAPH##
+This produces the heatmaps of gene expression, and identifies clusters of coexpressed genes. The plots produced here make up Figure 2.
 ```{r  compare heatmaps all }
 library(dendextend) #clustering
 library(gplots) #for heatmaps
 library(corrplot) #clustering
 
-dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-HBCC/correlation/"
+#heatmap.compare() is a function which code is found in functions.R
+
+dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-HBCC/correlation/"
 
 heatmap.CMC.HBCC <- cluster.heatmap(rpkm_log_CMC_HBCC[rownames(rpkm_log_CMC_HBCC) %in% subset,])
 
@@ -530,37 +534,36 @@ dev.off()
 order.CMC_HBCC <- heatmap.CMC.HBCC$colInd
 order.CMC_HBCC.gene_id <- rownames(rpkm_log_CMC_HBCC)[rownames(rpkm_log_CMC_HBCC) %in% subset][order.CMC_HBCC]
 
-write.csv(order.CMC_HBCC.gene_id, file = "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/order.CMC_HBCC.gene_id.txt")
+write.csv(order.CMC_HBCC.gene_id, file = "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/order.CMC_HBCC.gene_id.txt")
 
 
-dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-Pitt/correlation/"
+dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/CMC-Pitt/correlation/"
 pdf(file = paste0(dir, "high_L2g_heatmap_compare.pdf"))
 heatmap.compare(rpkm_log_CMC_Pitt[rownames(rpkm_log_CMC_Pitt) %in% subset,] , order = order.CMC_HBCC.gene_id)
 dev.off()
 
 
-dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/GVEX-SMRI/correlation/"
+dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/GVEX-SMRI/correlation/"
 pdf(file = paste0(dir, "high_L2g_heatmap_compare.pdf"))
 heatmap.compare(rpkm_log_GVEX_SMRI[rownames(rpkm_log_GVEX_SMRI) %in% subset,] , order = order.CMC_HBCC.gene_id)
 dev.off()
 
 
-dir <- "/Users/asbjorh/PhD/RNAseq_relative/4_cortical_sets/high_l2g_closest/BipSeq-sACC/correlation/"
+dir <- "~/RNAseq_relative/4_cortical_sets/high_l2g_closest/BipSeq-sACC/correlation/"
 pdf(file = paste0(dir, "high_L2g_heatmap_compare.pdf"))
 heatmap.compare(rpkm_log_BipSeq_sACC[rownames(rpkm_log_BipSeq_sACC) %in% subset,] , order = order.CMC_HBCC.gene_id)
 dev.off()
 
-
-
-
 ```
 
 ```{r define directory to save to}
-dir <- "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/high_l2g_closest/"
-#dir <- "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/random_genes/seed_222/"
-
+dir <- "~/RNAseq_DE/4_cortical_sets/high_l2g_closest/"
 ```
 
+
+##ADDITIONAL##
+analyse expression levels standardised with mean and sd of controls
+This analysis is not in the paper.
 ```{r z score from rpkm log values}
 #find the mean and sd of controls, all datasets
 rpkm_meanHC <- 
@@ -588,6 +591,9 @@ rpkm_z_wide <-
 
 ```
 
+
+##CORE##
+Analyse expression levels after regressing out the known covariates. This way, the expression analysis "absolute expression" is as comparable as possible to the modelled relative expression. The residualised expression values are also standardised with control mean and sd. 
 
 
 ```{r residualise expression}
@@ -665,8 +671,6 @@ rpkm_residual_subset_all_std <-
   left_join(rpkm_residual_meanHC, by=c("Set", "gene_id")) %>% 
   mutate(z_res= (res_expr - meanHC) / sdHC) 
 
-
-
 # Plotting boxplots of zscores by diagnosis and Set, facetted on genes.
 rpkm_log_boxplots <- rpkm_residual_subset_all_std %>%  
   ggplot(aes(x=Set, y= z_res, colour= PrimaryDiagnosis)) + 
@@ -685,6 +689,10 @@ rpkm_z_wide <-
 ```
 
 
+##CORE##
+Use the residualised and standardised expression values to predict diagnosis. Model in three datasets and cross-validate in the fourth. 
+##GRAPH##
+These results are found in Table 2 (right panel), AUC and p.
 
 ```{r logistic regression with cross validation}
 #Model each cortical dataset with the residualised rpkm-levels from the three others. calculate probabilities
@@ -769,6 +777,8 @@ res_rpkm_prob_wilcox <- rpkm_z_prob %>%  group_by(Set) %>% wilcox_test(prob ~ Pr
 write_tsv(res_rpkm_prob_wilcox, file= paste0(dir, "res_rpkm_prob_wilcox.txt"))
 
 ```
+##GRAPH##
+The resulting AUC plots are found in Figure 6f
 
 ```{r plot ROC curves}
 
@@ -809,6 +819,8 @@ ggsave(plot =ROC_glm_rpkm_z, filename = paste0(dir,"ROC_glm_rpkm_z.pdf"), width 
 
 ```
 
+##GRAPH##
+These residualised and standardised absolute expression levels are shown in Figure 1a
 ```{r plot selected residualised rpkm}
 rpkm_residual_subset_all_std$PrimaryDiagnosis <- factor(rpkm_residual_subset_all_std$PrimaryDiagnosis, levels = c("HC", "BD"))
   
@@ -846,14 +858,11 @@ p_white <- p + theme(strip.background.y = element_rect(fill  = "white")) + coord
   ggsave(plot=p_blue, path = dir, filename = "compare_res_BD_HC_bluestrip_BD_model.pdf", width = 9, height = 10.48, units = "cm")
   ggsave(plot=p_white, path = dir, filename = "compare_res_BD_HC_whitestrip_BD_model.pdf", width = 9, height = 10.48, units = "cm")
  
- 
-
-
-
-
 ```
 
-
+##CORE##
+##GRAPH##
+The following produces the density plots of predicted diagnosis found in Figure 6e, that are based on absolute expression. The R2 on the liability scale, r2l, are found in Table2, rightmost panel.
 
 ```{r investigating the predicted probabilities further}
 
@@ -926,10 +935,13 @@ ggsave(prob_glm_diag, filename = paste0(dir, "prob_glm_diag_wide.pdf"), width =9
 ```
 
 
+##CORE##
+##GRAPH##
+The following visualises the differential expression based on residualised and standardised expression values. The plot is found in Figure 1b.
 
 ```{r plot DE of residualised expression values}
-rpkm_residual_subset_all_std <- read_tsv("/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/residualised_expression/high_l2g_closest/rpkm_residual_subset_all_std.txt")
-dir <- "/Users/asbjorh/PhD/RNAseq_DE/4_cortical_sets/residualised_expression/high_l2g_closest/"
+rpkm_residual_subset_all_std <- read_tsv("~/RNAseq_DE/4_cortical_sets/residualised_expression/high_l2g_closest/rpkm_residual_subset_all_std.txt")
+dir <- "~/RNAseq_DE/4_cortical_sets/residualised_expression/high_l2g_closest/"
 
 stat.test_all<-
   rpkm_residual_subset_all_l %>% 
@@ -1031,13 +1043,13 @@ ggsave(statistic, filename = paste0(dir, "res_expr_statistic_all_sets_pthr_0.15.
 
 
 
-
-DE analysis with LIMMA-VOOM (IA)
+##CORE##
+DE analysis with LIMMA-VOOM (IA). This is a standard RNAseq DE expression analysis. The only difference from previous studies by others is that we only look at the BD GWAS l2g-genes, and therefore do not apply correction for multiple testing on the entire transcriptome. The result is visualised in Figure 1c.
 
 
 ```{r work on limma results IA}
 
-list.limma <- list.files(path = "/Users/asbjorh/PhD/RNAseq_DE/Ibrahim/", pattern = "^de_limma", full.names = TRUE)
+list.limma <- list.files(path = "~/RNAseq_DE/Ibrahim/", pattern = "^de_limma", full.names = TRUE)
 
 dat = lapply(list.limma, 
              function(i){          
@@ -1054,7 +1066,7 @@ limma_DE <-
   do.call("rbind.data.frame", dat) #make a dataframe out of the imported datasets 
 
 limma_DE$Set <- #remove unnescessary prefix text from set names
-  str_remove(limma_DE$Set, "/Users/asbjorh/PhD/RNAseq_DE/Ibrahim//de_limma_") 
+  str_remove(limma_DE$Set, "~/RNAseq_DE/Ibrahim//de_limma_") 
 
 limma_DE$Set <- #remove unnescessary suffix text from set names
   str_remove(limma_DE$Set, ".txt") 
@@ -1141,7 +1153,7 @@ limma_DE_table <- limma_DE %>%  pivot_wider( names_from = Set, values_from = c(l
              lwd=0.1, colour="gray")# Horizonal lines
 
    
-dir <-    "/Users/asbjorh/PhD/RNAseq_DE/"
+dir <-    "~/RNAseq_DE/"
 ggsave(statistic, filename = paste0(dir, "WSR_statistic_all_sets.pdf"),  width=4.9, height= 11.75, units="cm") 
 ggsave(statistic, filename = paste0(dir, "WSR_statistic_all_sets_pthr_0.15.pdf"),  width=4.9, height= 11.75, units="cm") 
 
