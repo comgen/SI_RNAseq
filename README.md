@@ -7,7 +7,7 @@ by Asbjørn Holmgren et al (2023)
 ## Description
 The file DE_absolute_v08.Rmd consists of code to import and normalise the RNAseq data and do differential gene expression analysis. 
 It produces the results for "absolute gene expression" analysis, i,e. figure 1. It also produces the correlation heatmaps in Figure 2.
-The file SI_relative_v08.Rmd consists of code to do the expression modelling, calculating the SI score and predict diagnosis (cross validation), 
+The file SI_relative_v09.Rmd consists of code to do the expression modelling, calculating the SI score and predict diagnosis (cross validation), 
 as well as control experiments (HC vs HC and model in BD). 
 
 
